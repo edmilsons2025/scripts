@@ -531,10 +531,80 @@ function Coletar-Hardware {
     Marcar 'Hardware'
 }
 
+# Roda o powercfg protegido por timeout. Um powercfg que trava e sintoma
+# classico de barramento I2C/SMBus travado no controlador da bateria.
+# Retorna 'OK', 'TIMEOUT' ou 'ERRO'.
+function Invoke-PowercfgSeguro {
+    param([string]$Args, [int]$TimeoutSeg = 30)
+    try {
+        $p = Start-Process -FilePath 'powercfg' -ArgumentList $Args -PassThru -WindowStyle Hidden -ErrorAction Stop
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $TimeoutSeg) { Start-Sleep -Milliseconds 400 }
+        if (-not $p.HasExited) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}; return 'TIMEOUT' }
+        return 'OK'
+    } catch { return 'ERRO' }
+}
+
+# Parse do battery-report em XML (fonte mais completa e sem depender de locale).
+# Namespace-agnostico: usa local-name() para pegar os nos independente do xmlns.
+function Parse-BatteryReportXml {
+    param([string]$XmlPath)
+    if (-not (Test-Path $XmlPath)) { return $null }
+    try { [xml]$doc = Get-Content $XmlPath -Raw -ErrorAction Stop } catch { return $null }
+
+    $out = [ordered]@{ Sistema = [ordered]@{}; Baterias = @() }
+
+    $sys = $doc.SelectSingleNode("//*[local-name()='SystemInformation']")
+    if ($sys) {
+        foreach ($c in $sys.ChildNodes) {
+            if ($c.NodeType -eq [System.Xml.XmlNodeType]::Element) { $out.Sistema[$c.LocalName] = $c.InnerText }
+        }
+        if ($sys.Attributes) { foreach ($a in $sys.Attributes) { $out.Sistema[$a.LocalName] = $a.Value } }
+    }
+
+    foreach ($b in $doc.SelectNodes("//*[local-name()='Battery']")) {
+        $o = [ordered]@{}
+        foreach ($c in $b.ChildNodes) {
+            if ($c.NodeType -eq [System.Xml.XmlNodeType]::Element) { $o[$c.LocalName] = $c.InnerText }
+        }
+        if ($b.Attributes) { foreach ($a in $b.Attributes) { $o[$a.LocalName] = $a.Value } }
+
+        $dc = [int64]0; $fc = [int64]0
+        [void][int64]::TryParse(('' + $o['DesignCapacity']), [ref]$dc)
+        [void][int64]::TryParse(('' + $o['FullChargeCapacity']), [ref]$fc)
+        if ($dc -gt 0 -and $fc -gt 0) { $o['WearPct'] = [math]::Round((1 - ($fc / $dc)) * 100, 1) }
+
+        $out.Baterias += , ([PSCustomObject]$o)
+    }
+    return [PSCustomObject]$out
+}
+
+# Extrai as linhas de uma tabela do battery-report.html entre dois marcadores.
+# Retorna um array de arrays de celulas (texto limpo). Serve para o historico
+# de capacidade e para as estimativas de autonomia (tabelas so presentes no HTML).
+function Parse-HtmlSectionRows {
+    param([string]$Html, [string]$StartRegex, [string]$EndRegex)
+    $out = @()
+    if (-not $Html) { return $out }
+    $m = [regex]::Match($Html, "(?is)$StartRegex(.*?)(?:$EndRegex)")
+    if (-not $m.Success) { return $out }
+    $sec = $m.Groups[1].Value
+    foreach ($tr in [regex]::Matches($sec, '(?is)<tr[^>]*>(.*?)</tr>')) {
+        $cells = @()
+        foreach ($td in [regex]::Matches($tr.Groups[1].Value, '(?is)<t[dh][^>]*>(.*?)</t[dh]>')) {
+            $txt = ($td.Groups[1].Value -replace '(?is)<[^>]+>', ' ' -replace '&nbsp;', ' ' -replace '\s+', ' ').Trim()
+            $cells += $txt
+        }
+        if ($cells.Count -gt 0) { $out += , $cells }
+    }
+    return $out
+}
+
 function Coletar-Bateria {
     Detectar-Ambiente
-    Log ">> Coletando dados de bateria/BMS..." 'Cyan'
+    Log ">> Coletando dados de bateria/BMS (completo)..." 'Cyan'
 
+    # --- Telemetria WMI/CIM ---
     $BatWin32   = Executar "Win32_Battery" { Get-CimInstance Win32_Battery -ErrorAction Stop }
     $BatStatic  = Executar "BatteryStaticData (capacidade de projeto)" { Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop }
     $BatFull    = Executar "BatteryFullChargedCapacity (capacidade cheia)" { Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop }
@@ -549,18 +619,84 @@ function Coletar-Bateria {
     Salvar-Json $BatCycle  (Join-Path $script:Pastas.Bruto 'bateria_ciclos.json')
     Salvar-Json $BatTemp   (Join-Path $script:Pastas.Bruto 'bateria_temperatura.json')
 
+    # --- Relatorios do powercfg (HTML + XML + energy), so no modo ao vivo ---
+    $htmlPath   = Join-Path $script:Pastas.Bateria 'battery-report.html'
+    $xmlPath    = Join-Path $script:Pastas.Bateria 'battery-report.xml'
+    $energyPath = Join-Path $script:Pastas.Bateria 'energy-report.html'
+    $stBatHtml = '-'; $stBatXml = '-'; $stEnergy = '-'
     if ($script:ModoAoVivo) {
-        Executar "Gerar powercfg /batteryreport" {
-            powercfg /batteryreport /output (Join-Path $script:Pastas.Bateria 'battery-report.html') /duration 1 | Out-Null
-        }
+        Log "Gerando powercfg /batteryreport (HTML + XML) e /energy..." 'Cyan'
+        $stBatHtml = Invoke-PowercfgSeguro "/batteryreport /output `"$htmlPath`"" 30
+        $stBatXml  = Invoke-PowercfgSeguro "/batteryreport /output `"$xmlPath`" /xml" 30
+        $stEnergy  = Invoke-PowercfgSeguro "/energy /output `"$energyPath`" /duration 5" 60
+        Log "powercfg -> battery HTML: $stBatHtml | battery XML: $stBatXml | energy: $stEnergy" 'Gray'
+    } else {
+        Log "[INFO] powercfg /batteryreport so roda no modo ao vivo (Windows em execucao)." 'DarkGray'
     }
 
+    # --- Parse do relatorio (XML completo + tabelas do HTML) ---
+    $xmlParsed = $null
+    if (Test-Path $xmlPath) { $xmlParsed = Executar "Parse do battery-report.xml" { Parse-BatteryReportXml $xmlPath } }
+    if ($xmlParsed) { Salvar-Json $xmlParsed (Join-Path $script:Pastas.Bruto 'battery_report_parsed.json') }
+
+    $htmlContent = $null
+    if (Test-Path $htmlPath) { try { $htmlContent = Get-Content $htmlPath -Raw -ErrorAction Stop } catch {} }
+
+    # Historico de capacidade ao longo do tempo (mostra a degradacao mes a mes).
+    $capHist = @()
+    if ($htmlContent) {
+        $capHist = @(Parse-HtmlSectionRows $htmlContent 'Battery capacity history' 'Battery life estimates|</body>') |
+            Where-Object { $_.Count -ge 3 -and $_[0] -match '\d{4}' }
+    }
+    if ($capHist.Count -gt 0) {
+        $capObj = $capHist | ForEach-Object { [PSCustomObject]@{ Periodo = $_[0]; CapacidadeCheia = $_[1]; CapacidadeProjeto = $_[2] } }
+        Salvar-Csv $capObj (Join-Path $script:Pastas.Bateria 'historico_capacidade.csv')
+    }
+
+    # Estimativas de autonomia (autonomia a plena carga x capacidade de projeto).
+    $lifeEst = @()
+    if ($htmlContent) {
+        $lifeEst = @(Parse-HtmlSectionRows $htmlContent 'Battery life estimates' '</body>') |
+            Where-Object { $_.Count -ge 2 -and $_[0] -match '\d{4}' }
+    }
+    if ($lifeEst.Count -gt 0) {
+        $lifeObj = $lifeEst | ForEach-Object {
+            [PSCustomObject]@{
+                Periodo       = $_[0]
+                AtivoCheia    = if ($_.Count -gt 1) { $_[1] } else { '-' }
+                StandbyCheia  = if ($_.Count -gt 2) { $_[2] } else { '-' }
+                AtivoProjeto  = if ($_.Count -gt 3) { $_[3] } else { '-' }
+                StandbyProjeto= if ($_.Count -gt 4) { $_[4] } else { '-' }
+            }
+        }
+        Salvar-Csv $lifeObj (Join-Path $script:Pastas.Bateria 'estimativas_autonomia.csv')
+    }
+
+    # --- Desgaste: prioriza XML do relatorio; cai pra WMI se preciso ---
     $DesgastePct = $null
-    if ($BatStatic -and $BatFull) {
+    if ($xmlParsed -and $xmlParsed.Baterias.Count -gt 0) {
+        $b0 = $xmlParsed.Baterias[0]
+        if ($b0.PSObject.Properties['WearPct']) { $DesgastePct = $b0.WearPct }
+    }
+    if ($null -eq $DesgastePct -and $BatStatic -and $BatFull) {
         $projeto = ($BatStatic | Select-Object -First 1).DesignedCapacity
         $cheia   = ($BatFull | Select-Object -First 1).FullChargedCapacity
         if ($projeto -gt 0) { $DesgastePct = [math]::Round((1 - ($cheia / $projeto)) * 100, 1) }
     }
+
+    # --- Monta o RESUMO_BATERIA.md (rico) ---
+    $mb = New-Object System.Text.StringBuilder
+    [void]$mb.AppendLine("# Bateria / BMS - Relatorio Completo`n")
+    [void]$mb.AppendLine("_gerado em $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')_`n")
+
+    [void]$mb.AppendLine("## Status da coleta (powercfg)`n")
+    [void]$mb.AppendLine("| Relatorio | Status |")
+    [void]$mb.AppendLine("| --- | --- |")
+    [void]$mb.AppendLine("| battery-report.html | $stBatHtml |")
+    [void]$mb.AppendLine("| battery-report.xml  | $stBatXml |")
+    [void]$mb.AppendLine("| energy-report.html  | $stEnergy |")
+    [void]$mb.AppendLine("")
+    [void]$mb.AppendLine("> TIMEOUT em qualquer um sugere barramento I2C/SMBus travado no controlador da bateria.`n")
 
     $temBateria = [bool]$BatWin32
     $ResumoBateria = [ordered]@{
@@ -568,18 +704,102 @@ function Coletar-Bateria {
         'Fabricante'                   = ($BatStatic | Select-Object -First 1).ManufactureName
         'Quimica'                      = ($BatStatic | Select-Object -First 1).Chemistry
         'Numero de serie'              = ($BatStatic | Select-Object -First 1).SerialNumber
+        'Data de fabricacao'           = ($BatStatic | Select-Object -First 1).ManufactureDate
+        'Tensao de projeto (mV)'       = ($BatStatic | Select-Object -First 1).DesignedVoltage
         'Capacidade de projeto (mWh)'  = ($BatStatic | Select-Object -First 1).DesignedCapacity
         'Capacidade cheia atual (mWh)' = ($BatFull | Select-Object -First 1).FullChargedCapacity
         'Desgaste estimado'            = if ($null -ne $DesgastePct) { "$DesgastePct%" } else { '-' }
         'Ciclos de carga'              = ($BatCycle | Select-Object -First 1).CycleCount
         'Status (Win32_Battery)'       = ($BatWin32 | Select-Object -First 1).Status
         'Carga estimada (%)'           = ($BatWin32 | Select-Object -First 1).EstimatedChargeRemaining
+        'Autonomia estimada (min)'     = $(if (($BatWin32 | Select-Object -First 1).EstimatedRunTime -and ($BatWin32 | Select-Object -First 1).EstimatedRunTime -lt 71582788) { ($BatWin32 | Select-Object -First 1).EstimatedRunTime } else { '- (na tomada)' })
         'Temperatura'                  = if ($BatTemp) { ($BatTemp | Select-Object -First 1).Temperature } else { 'nao exposto pelo BMS/EC' }
     }
-    Escrever-TabelaMd -Campos $ResumoBateria -Titulo 'Bateria / BMS' |
-        Out-File (Join-Path $script:Pastas.Bateria 'RESUMO_BATERIA.md') -Encoding UTF8
+    [void]$mb.AppendLine((Escrever-TabelaMd -Campos $ResumoBateria -Titulo 'Resumo (WMI/CIM)'))
 
-    # Eventos de energia (precisa do System.evtx copiado).
+    # Por bateria, direto do XML do powercfg (todos os campos disponiveis).
+    if ($xmlParsed -and $xmlParsed.Baterias.Count -gt 0) {
+        $i = 0
+        foreach ($bat in $xmlParsed.Baterias) {
+            $i++
+            $campos = [ordered]@{}
+            foreach ($pn in $bat.PSObject.Properties.Name) { $campos[$pn] = $bat.$pn }
+            [void]$mb.AppendLine((Escrever-TabelaMd -Campos $campos -Titulo "Bateria #$i (powercfg XML)"))
+        }
+    }
+
+    # Historico de capacidade (degradacao ao longo do tempo).
+    if ($capHist.Count -gt 0) {
+        [void]$mb.AppendLine("## Historico de capacidade (degradacao ao longo do tempo)`n")
+        [void]$mb.AppendLine("| Periodo | Capacidade cheia | Capacidade de projeto |")
+        [void]$mb.AppendLine("| --- | --- | --- |")
+        foreach ($r in $capHist) { [void]$mb.AppendLine("| $($r[0]) | $($r[1]) | $($r[2]) |") }
+        [void]$mb.AppendLine("")
+    }
+
+    # Estimativas de autonomia.
+    if ($lifeEst.Count -gt 0) {
+        [void]$mb.AppendLine("## Estimativas de autonomia`n")
+        [void]$mb.AppendLine("| Periodo | Ativo (cheia) | Standby (cheia) | Ativo (projeto) | Standby (projeto) |")
+        [void]$mb.AppendLine("| --- | --- | --- | --- | --- |")
+        foreach ($r in $lifeEst) {
+            $c1 = if ($r.Count -gt 1) { $r[1] } else { '-' }
+            $c2 = if ($r.Count -gt 2) { $r[2] } else { '-' }
+            $c3 = if ($r.Count -gt 3) { $r[3] } else { '-' }
+            $c4 = if ($r.Count -gt 4) { $r[4] } else { '-' }
+            [void]$mb.AppendLine("| $($r[0]) | $c1 | $c2 | $c3 | $c4 |")
+        }
+        [void]$mb.AppendLine("")
+    }
+
+    # Plano de energia ativo (so ao vivo).
+    if ($script:ModoAoVivo) {
+        $plano = Executar "Plano de energia ativo (powercfg /getactivescheme)" { powercfg /getactivescheme | Out-String }
+        if ($plano) {
+            [void]$mb.AppendLine("## Plano de energia ativo`n")
+            [void]$mb.AppendLine('```text')
+            [void]$mb.AppendLine($plano.Trim())
+            [void]$mb.AppendLine('```')
+            [void]$mb.AppendLine("")
+        }
+    }
+
+    # Dados brutos completos (Format-List *) - toda propriedade exposta pelo BMS.
+    [void]$mb.AppendLine("## Dados brutos (Format-List completo)`n")
+    $paresBrutos = @(
+        @('Win32_Battery', $BatWin32),
+        @('BatteryStatus (root\wmi - tempo real)', $BatStatus),
+        @('BatteryStaticData (root\wmi - registradores de fabrica)', $BatStatic),
+        @('BatteryFullChargedCapacity (root\wmi)', $BatFull),
+        @('BatteryCycleCount (root\wmi)', $BatCycle),
+        @('BatteryTemperature (root\wmi)', $BatTemp)
+    )
+    foreach ($par in $paresBrutos) {
+        [void]$mb.AppendLine("### $($par[0])")
+        [void]$mb.AppendLine('```text')
+        if ($par[1]) {
+            [void]$mb.AppendLine((($par[1] | Format-List * | Out-String).Trim()))
+        } else {
+            [void]$mb.AppendLine('[sem dados retornados pelo hardware para esta classe]')
+        }
+        [void]$mb.AppendLine('```')
+        [void]$mb.AppendLine("")
+    }
+
+    [void]$mb.AppendLine("## Arquivos gerados`n")
+    [void]$mb.AppendLine("- battery-report.html / .xml - relatorio nativo do powercfg (completo)")
+    [void]$mb.AppendLine("- energy-report.html - analise de energia/eficiencia (/energy)")
+    [void]$mb.AppendLine("- historico_capacidade.csv / estimativas_autonomia.csv - tabelas extraidas")
+    [void]$mb.AppendLine("- 09_Dados_Brutos\\battery_report_parsed.json - XML parseado")
+    [void]$mb.AppendLine("- eventos_energia_bateria.csv - eventos de energia (se coletado)`n")
+    [void]$mb.AppendLine("## Como ler`n")
+    [void]$mb.AppendLine("- Desgaste = 1 - (capacidade cheia / capacidade de projeto). Acima de ~20% ja e desgaste relevante.")
+    [void]$mb.AppendLine("- Ciclos acima de ~500 costumam justificar troca em uso intenso.")
+    [void]$mb.AppendLine("- LastErrorCode != 0 no Win32_Battery: consultar doc da Microsoft.")
+
+    $mb.ToString() | Out-File (Join-Path $script:Pastas.Bateria 'RESUMO_BATERIA.md') -Encoding UTF8
+
+    # --- Eventos de energia (precisa do System.evtx copiado) ---
     $SystemEvtx = Join-Path $script:Pastas.EventLogs 'System.evtx'
     if (Test-Path $SystemEvtx) {
         $EventosBateria = Executar "Eventos de energia (Kernel-Power etc.)" {
