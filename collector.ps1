@@ -255,7 +255,7 @@ function Detectar-Ambiente {
     if (-not $script:WinDrive) {
         Log "[ERRO] Particao do Windows nao encontrada. So o inventario de hardware/bateria funcionara." 'Red'
     } elseif ($script:ModoAoVivo) {
-        Log "Windows em execucao detectado em $($script:WinDrive) (modo ao vivo)" 'Green'
+        Log "Windows em execucao detectado em $($script:WinDrive)" 'Green'
     } else {
         Log "Windows encontrado em $($script:WinDrive) (modo offline / particao inativa)" 'Green'
     }
@@ -991,7 +991,7 @@ function Mostrar-Menu {
     Detectar-Ambiente
     $amb = "Windows NAO encontrado (so hardware/bateria)"
     if ($script:WinDrive) {
-        if ($script:ModoAoVivo)  { $amb = "Windows ao vivo ($($script:WinDrive))" }
+        if ($script:ModoAoVivo)  { $amb = "Windows ($($script:WinDrive))" }
         elseif ($script:IsWinPE) { $amb = "WinPE / offline - Windows em $($script:WinDrive)" }
         else                     { $amb = "Offline - Windows em $($script:WinDrive)" }
     } elseif ($script:IsWinPE) {
