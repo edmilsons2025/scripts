@@ -79,7 +79,11 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $DestinoFoiInformado = $PSBoundParameters.ContainsKey('Destino')
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Quando o script roda via irm/iex (sem arquivo em disco), MyCommand.Path e
+# nulo - por isso so chamamos Split-Path se houver caminho, evitando o erro.
+$ScriptRoot = $null
+$ScriptPath = $MyInvocation.MyCommand.Path
+if ($ScriptPath) { $ScriptRoot = Split-Path -Parent $ScriptPath }
 if (-not $ScriptRoot) { $ScriptRoot = (Get-Location).Path }
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
