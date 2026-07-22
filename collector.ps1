@@ -151,7 +151,8 @@ function Escrever-TabelaMd {
     [void]$sb.AppendLine("| --- | --- |")
     foreach ($k in $Campos.Keys) {
         $v = $Campos[$k]
-        if ($null -eq $v -or $v -eq '') { $v = '-' }
+        # so trata como vazio: null ou string vazia. O numero 0 e valor valido.
+        if ($null -eq $v -or ($v -is [string] -and $v.Trim() -eq '')) { $v = '-' }
         [void]$sb.AppendLine("| $k | $v |")
     }
     return $sb.ToString()
@@ -255,7 +256,7 @@ function Detectar-Ambiente {
     if (-not $script:WinDrive) {
         Log "[ERRO] Particao do Windows nao encontrada. So o inventario de hardware/bateria funcionara." 'Red'
     } elseif ($script:ModoAoVivo) {
-        Log "Windows em execucao detectado em $($script:WinDrive)" 'Green'
+        Log "Windows em execucao detectado em $($script:WinDrive) (modo ao vivo)" 'Green'
     } else {
         Log "Windows encontrado em $($script:WinDrive) (modo offline / particao inativa)" 'Green'
     }
@@ -535,14 +536,17 @@ function Coletar-Hardware {
 # classico de barramento I2C/SMBus travado no controlador da bateria.
 # Retorna 'OK', 'TIMEOUT' ou 'ERRO'.
 function Invoke-PowercfgSeguro {
-    param([string]$Args, [int]$TimeoutSeg = 30)
+    # OBS: nao usar $Args como nome de parametro - e variavel automatica do
+    # PowerShell e corrompe o -ArgumentList.
+    param([string]$ArgLinha, [int]$TimeoutSeg = 30)
     try {
-        $p = Start-Process -FilePath 'powercfg' -ArgumentList $Args -PassThru -WindowStyle Hidden -ErrorAction Stop
+        $p = Start-Process -FilePath 'powercfg' -ArgumentList $ArgLinha -PassThru -WindowStyle Hidden -ErrorAction Stop
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $TimeoutSeg) { Start-Sleep -Milliseconds 400 }
         if (-not $p.HasExited) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}; return 'TIMEOUT' }
+        if ($null -ne $p.ExitCode -and $p.ExitCode -ne 0) { return "ERRO(cod $($p.ExitCode))" }
         return 'OK'
-    } catch { return 'ERRO' }
+    } catch { return "ERRO($($_.Exception.Message))" }
 }
 
 # Parse do battery-report em XML (fonte mais completa e sem depender de locale).
@@ -672,16 +676,47 @@ function Coletar-Bateria {
         Salvar-Csv $lifeObj (Join-Path $script:Pastas.Bateria 'estimativas_autonomia.csv')
     }
 
-    # --- Desgaste: prioriza XML do relatorio; cai pra WMI se preciso ---
-    $DesgastePct = $null
-    if ($xmlParsed -and $xmlParsed.Baterias.Count -gt 0) {
-        $b0 = $xmlParsed.Baterias[0]
-        if ($b0.PSObject.Properties['WearPct']) { $DesgastePct = $b0.WearPct }
+    # --- Consolida campos de varias fontes (WMI falha em alguns BMS OEM;
+    #     nesse caso o XML do powercfg cobre design/serial/quimica/ciclos) ---
+    $b0 = $null
+    if ($xmlParsed -and $xmlParsed.Baterias.Count -gt 0) { $b0 = $xmlParsed.Baterias[0] }
+    function Xget {
+        param($obj, [string]$p)
+        if ($obj -and $obj.PSObject.Properties[$p]) { return $obj.$p }
+        return $null
     }
-    if ($null -eq $DesgastePct -and $BatStatic -and $BatFull) {
-        $projeto = ($BatStatic | Select-Object -First 1).DesignedCapacity
-        $cheia   = ($BatFull | Select-Object -First 1).FullChargedCapacity
-        if ($projeto -gt 0) { $DesgastePct = [math]::Round((1 - ($cheia / $projeto)) * 100, 1) }
+    function Vazio {
+        param($v)
+        return ($null -eq $v -or "$v".Trim() -eq '')
+    }
+
+    $stManu    = ($BatStatic | Select-Object -First 1).ManufactureName
+    $stChem    = ($BatStatic | Select-Object -First 1).Chemistry
+    $stSerial  = ($BatStatic | Select-Object -First 1).SerialNumber
+    $stMfgDate = ($BatStatic | Select-Object -First 1).ManufactureDate
+    $stDesignV = ($BatStatic | Select-Object -First 1).DesignedVoltage
+    $stDesignC = ($BatStatic | Select-Object -First 1).DesignedCapacity
+    $fullC     = ($BatFull   | Select-Object -First 1).FullChargedCapacity
+    $cyc       = ($BatCycle  | Select-Object -First 1).CycleCount
+
+    if ($b0) {
+        if (Vazio $stManu)    { $stManu    = Xget $b0 'Manufacturer' }
+        if (Vazio $stChem)    { $stChem    = Xget $b0 'Chemistry' }
+        if (Vazio $stSerial)  { $stSerial  = Xget $b0 'SerialNumber' }
+        if (Vazio $stMfgDate) { $stMfgDate = Xget $b0 'ManufactureDate' }
+        if ((Vazio $stDesignC) -or ($stDesignC -eq 0)) { $x = Xget $b0 'DesignCapacity'; if (-not (Vazio $x)) { $stDesignC = $x } }
+        if (Vazio $fullC)     { $x = Xget $b0 'FullChargeCapacity'; if (-not (Vazio $x)) { $fullC = $x } }
+        if (Vazio $cyc)       { $x = Xget $b0 'CycleCount'; if (-not (Vazio $x)) { $cyc = $x } }
+    }
+
+    # --- Desgaste: prioriza WearPct do XML; senao calcula do design x cheia ---
+    $DesgastePct = $null
+    if ($b0) { $DesgastePct = Xget $b0 'WearPct' }
+    if ($null -eq $DesgastePct) {
+        $dcv = [int64]0; $fcv = [int64]0
+        [void][int64]::TryParse(("$stDesignC" -replace '[^\d]', ''), [ref]$dcv)
+        [void][int64]::TryParse(("$fullC" -replace '[^\d]', ''), [ref]$fcv)
+        if ($dcv -gt 0 -and $fcv -gt 0) { $DesgastePct = [math]::Round((1 - ($fcv / $dcv)) * 100, 1) }
     }
 
     # --- Monta o RESUMO_BATERIA.md (rico) ---
@@ -699,20 +734,22 @@ function Coletar-Bateria {
     [void]$mb.AppendLine("> TIMEOUT em qualquer um sugere barramento I2C/SMBus travado no controlador da bateria.`n")
 
     $temBateria = [bool]$BatWin32
+    $runTime = ($BatWin32 | Select-Object -First 1).EstimatedRunTime
     $ResumoBateria = [ordered]@{
         'Bateria detectada'            = if ($temBateria) { 'Sim' } else { 'Nao (desktop, ou BMS nao exposto via WMI)' }
-        'Fabricante'                   = ($BatStatic | Select-Object -First 1).ManufactureName
-        'Quimica'                      = ($BatStatic | Select-Object -First 1).Chemistry
-        'Numero de serie'              = ($BatStatic | Select-Object -First 1).SerialNumber
-        'Data de fabricacao'           = ($BatStatic | Select-Object -First 1).ManufactureDate
-        'Tensao de projeto (mV)'       = ($BatStatic | Select-Object -First 1).DesignedVoltage
-        'Capacidade de projeto (mWh)'  = ($BatStatic | Select-Object -First 1).DesignedCapacity
-        'Capacidade cheia atual (mWh)' = ($BatFull | Select-Object -First 1).FullChargedCapacity
+        'Fabricante'                   = $stManu
+        'Quimica'                      = $stChem
+        'Numero de serie'              = $stSerial
+        'Data de fabricacao'           = $stMfgDate
+        'Tensao de projeto (mV)'       = $stDesignV
+        'Capacidade de projeto (mWh)'  = $stDesignC
+        'Capacidade cheia atual (mWh)' = $fullC
         'Desgaste estimado'            = if ($null -ne $DesgastePct) { "$DesgastePct%" } else { '-' }
-        'Ciclos de carga'              = ($BatCycle | Select-Object -First 1).CycleCount
+        'Ciclos de carga'              = $cyc
+        'Fonte capac./ciclos'          = if ($b0) { 'powercfg XML (+WMI)' } else { 'WMI' }
         'Status (Win32_Battery)'       = ($BatWin32 | Select-Object -First 1).Status
         'Carga estimada (%)'           = ($BatWin32 | Select-Object -First 1).EstimatedChargeRemaining
-        'Autonomia estimada (min)'     = $(if (($BatWin32 | Select-Object -First 1).EstimatedRunTime -and ($BatWin32 | Select-Object -First 1).EstimatedRunTime -lt 71582788) { ($BatWin32 | Select-Object -First 1).EstimatedRunTime } else { '- (na tomada)' })
+        'Autonomia estimada (min)'     = $(if ($runTime -and $runTime -lt 71582788) { $runTime } else { '- (na tomada)' })
         'Temperatura'                  = if ($BatTemp) { ($BatTemp | Select-Object -First 1).Temperature } else { 'nao exposto pelo BMS/EC' }
     }
     [void]$mb.AppendLine((Escrever-TabelaMd -Campos $ResumoBateria -Titulo 'Resumo (WMI/CIM)'))
@@ -815,6 +852,7 @@ function Coletar-Bateria {
 
     $script:Dados['DesgastePct'] = $DesgastePct
     $script:Dados['BatCycle'] = $BatCycle
+    $script:Dados['Ciclos'] = $cyc
     Marcar 'Bateria'
 }
 
@@ -885,8 +923,9 @@ function Gerar-ResumoGeral {
     [void]$md.AppendLine("")
     [void]$md.AppendLine("## Bateria / BMS")
     [void]$md.AppendLine("")
+    $ciclosResumo = if ($null -ne $script:Dados['Ciclos'] -and "$($script:Dados['Ciclos'])" -ne '') { $script:Dados['Ciclos'] } elseif ($BatCycle) { ($BatCycle | Select-Object -First 1).CycleCount } else { '-' }
     [void]$md.AppendLine("- Desgaste estimado: $(if ($null -ne $DesgastePct) { "$DesgastePct%" } else { '-' })")
-    [void]$md.AppendLine("- Ciclos de carga: $(($BatCycle | Select-Object -First 1).CycleCount)")
+    [void]$md.AppendLine("- Ciclos de carga: $ciclosResumo")
     [void]$md.AppendLine("- Eventos de energia/bateria: $nBateria (ver 07_Bateria_BMS)")
     [void]$md.AppendLine("")
     [void]$md.AppendLine("## Armazenamento")
@@ -991,7 +1030,7 @@ function Mostrar-Menu {
     Detectar-Ambiente
     $amb = "Windows NAO encontrado (so hardware/bateria)"
     if ($script:WinDrive) {
-        if ($script:ModoAoVivo)  { $amb = "Windows ($($script:WinDrive))" }
+        if ($script:ModoAoVivo)  { $amb = "Windows ao vivo ($($script:WinDrive))" }
         elseif ($script:IsWinPE) { $amb = "WinPE / offline - Windows em $($script:WinDrive)" }
         else                     { $amb = "Offline - Windows em $($script:WinDrive)" }
     } elseif ($script:IsWinPE) {
