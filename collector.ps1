@@ -48,223 +48,10 @@ if ($ScriptPath) { $ScriptRoot = Split-Path -Parent $ScriptPath }
 if (-not $ScriptRoot) { $ScriptRoot = (Get-Location).Path }
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
-$script:Dados      = [ordered]@{}
-$script:Executadas = New-Object System.Collections.ArrayList
-
-function Marcar {
-    param([string]$Nome)
-    if (-not $script:Executadas.Contains($Nome)) { [void]$script:Executadas.Add($Nome) }
-}
-
-$script:LogFile = $null
-$script:LogEnc  = New-Object System.Text.UTF8Encoding($false)
-
-function Log {
-    param([string]$Msg, [string]$Cor = 'Gray')
-    $linha = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Msg
-    Write-Host $linha -ForegroundColor $Cor
-    if ($script:LogFile) {
-        try { [System.IO.File]::AppendAllText($script:LogFile, ($linha + "`r`n"), $script:LogEnc) } catch {}
-    }
-}
-
-function Executar {
-    param(
-        [Parameter(Mandatory)][string]$Nome,
-        [Parameter(Mandatory)][scriptblock]$Bloco,
-        [switch]$Silencioso
-    )
-    try {
-        $resultado = & $Bloco
-        if (-not $Silencioso) { Log "[OK] $Nome" 'Green' }
-        return $resultado
-    } catch {
-        Log "[FALHOU] $Nome -> $($_.Exception.Message)" 'Yellow'
-        return $null
-    }
-}
-
-function Salvar-Json {
-    param($Objeto, [string]$Caminho)
-    if ($null -eq $Objeto) { return }
-    try { $Objeto | ConvertTo-Json -Depth 6 | Out-File -FilePath $Caminho -Encoding UTF8 } catch {}
-}
-
-function Salvar-Csv {
-    param($Objeto, [string]$Caminho)
-    if ($null -eq $Objeto) { return }
-    try { $Objeto | Export-Csv -Path $Caminho -NoTypeInformation -Encoding UTF8 } catch {}
-}
-
-function Escrever-TabelaMd {
-    param([Parameter(Mandatory)]$Campos, [string]$Titulo)
-    $sb = New-Object System.Text.StringBuilder
-    if ($Titulo) { [void]$sb.AppendLine("## $Titulo`n") }
-    [void]$sb.AppendLine("| Campo | Valor |")
-    [void]$sb.AppendLine("| --- | --- |")
-    foreach ($k in $Campos.Keys) {
-        $v = $Campos[$k]
-        if ($null -eq $v -or ($v -is [string] -and $v.Trim() -eq '')) { $v = '-' }
-        [void]$sb.AppendLine("| $k | $v |")
-    }
-    return $sb.ToString()
-}
-
-$script:Pastas    = $null
-$script:WinDrive  = $null
-$script:IsWinPE   = $false
-$script:ModoAoVivo= $false
-$script:AmbienteOk= $false
-
-function Selecionar-DestinoAuto {
-    $cands = @()
-    try {
-        $vols = Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -eq 2 -or $_.DriveType -eq 3 }
-        foreach ($v in $vols) {
-            if ($v.DeviceID -eq 'X:') { continue }
-            if (-not $v.FreeSpace) { continue }
-            $cands += [PSCustomObject]@{ Letra = $v.DeviceID; Livre = [int64]$v.FreeSpace; Tipo = [int]$v.DriveType }
-        }
-    } catch {}
-
-    $cands = $cands | Sort-Object @{ Expression = { if ($_.Tipo -eq 2) { 0 } else { 1 } } }, @{ Expression = { $_.Livre }; Descending = $true }
-
-    foreach ($c in $cands) {
-        if ($c.Livre -lt 200MB) { continue }
-        $teste = Join-Path ($c.Letra + '\') ('._coleta_test_' + $Timestamp)
-        try {
-            New-Item -ItemType Directory -Path $teste -Force -ErrorAction Stop | Out-Null
-            Remove-Item $teste -Recurse -Force -ErrorAction SilentlyContinue
-            $gb = [math]::Round($c.Livre / 1GB, 1)
-            $tipoTxt = if ($c.Tipo -eq 2) { 'USB/Removivel' } else { 'Disco Local' }
-            Log "Destino automatico: $($c.Letra) ($tipoTxt, $gb GB livres)" 'Green'
-            return $c.Letra
-        } catch { continue }
-    }
-    return $null
-}
-
-function Inicializar-Destino {
-    if ($script:Pastas) { return }
-
-    $DriveDestino = $null
-    try { $DriveDestino = (Split-Path -Qualifier $Destino -ErrorAction Stop) } catch {}
-    if (-not $DestinoFoiInformado -and $DriveDestino -eq 'X:') {
-        Write-Host ""
-        Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
-        Write-Host "  ALERTA CRITICO: Gravando no ramdisk (X:\) do ambiente WinPE." -ForegroundColor Red
-        Write-Host "  Os dados serao volatilizados no proximo ciclo de energia." -ForegroundColor Red
-        Write-Host "  Recomenda-se selecionar um volume persistente atraves do menu." -ForegroundColor Red
-        Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
-        Write-Host ""
-    }
-
-    $script:Pastas = [ordered]@{
-        Resumo    = Join-Path $Destino '00_Resumo'
-        EventLogs = Join-Path $Destino '01_EventLogs'
-        Panther   = Join-Path $Destino '02_Panther'
-        Dumps     = Join-Path $Destino '03_Dumps_e_WER'
-        Boot      = Join-Path $Destino '04_Boot'
-        Registro  = Join-Path $Destino '05_Registro'
-        Hardware  = Join-Path $Destino '06_Hardware'
-        Bateria   = Join-Path $Destino '07_Bateria_BMS'
-        Drivers   = Join-Path $Destino '08_Drivers'
-        Bruto     = Join-Path $Destino '09_Dados_Brutos'
-    }
-    foreach ($p in $script:Pastas.Values) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
-    $script:LogFile = Join-Path $Destino 'coleta_diagnostico.log'
-    Log "Diretorio Alvo: $Destino" 'Cyan'
-    Escrever-Visualizador
-}
-
-function Escrever-Visualizador {
-    <#
-    .SYNOPSIS
-      Grava o visualizador HTML (navegacao completa, tema claro/escuro, estilo shadcn) na raiz do
-      diretorio de coleta, para que va junto no arquivo compactado final.
-    #>
-    if ($script:VisualizadorGravado) { return }
-    $destHtml = Join-Path $Destino 'visualizador.html'
-    Executar "Gravacao do visualizador HTML na raiz da coleta" {
-        $htmlContent | Out-File -FilePath $destHtml -Encoding UTF8 -Force
-    } -Silencioso | Out-Null
-    $script:VisualizadorGravado = $true
-}
-
-function Gerar-DadosEmbutidos {
-    <#
-    .SYNOPSIS
-      Varre os arquivos de texto ja coletados (JSON, CSV, MD, TXT, LOG, XML, HTML) e embute o
-      conteudo de todos eles num unico 'dados.js', que define window.EMBEDDED_DATA. Com isso, o
-      visualizador.html abre com duplo-clique e carrega tudo automaticamente, sem o usuario precisar
-      selecionar a pasta. Arquivos binarios (evtx, dmp) sao referenciados como null (metadados apenas).
-    #>
-    Detectar-Ambiente
-    Log ">> Embutindo dados coletados no visualizador (dados.js)..." 'Cyan'
-    $jsPath = Join-Path $Destino 'dados.js'
-
-    $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg')
-    $extBinRef = @('.evtx', '.dmp')          # referenciados, mas conteudo nao embutido
-    $limiteBytes = 6MB                        # trava por arquivo, evita estourar memoria do navegador
-
-    Executar "Serializacao dos artefatos em dados.js" {
-        $baseLen = $Destino.TrimEnd('\').Length + 1
-        $rootName = Split-Path $Destino -Leaf
-
-        $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine("window.EMBEDDED_DATA = {")
-        [void]$sb.AppendLine("  rootName: $($rootName | ConvertTo-Json),")
-        [void]$sb.AppendLine("  files: {")
-
-        $arquivos = Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne 'dados.js' -and $_.Name -ne 'visualizador.html' }
-
-        $primeiro = $true
-        foreach ($arq in $arquivos) {
-            $rel = ($rootName + '\' + $arq.FullName.Substring($baseLen)) -replace '\\', '/'
-            $ext = $arq.Extension.ToLower()
-            $chaveJson = $rel | ConvertTo-Json
-
-            if (-not $primeiro) { [void]$sb.AppendLine(",") }
-            $primeiro = $false
-
-            if ($extBinRef -contains $ext) {
-                [void]$sb.Append("    $chaveJson`: null")
-            } elseif (($extTexto -contains $ext) -and ($arq.Length -le $limiteBytes)) {
-                try {
-                    $conteudo = [System.IO.File]::ReadAllText($arq.FullName, [System.Text.Encoding]::UTF8)
-                    $valJson = $conteudo | ConvertTo-Json
-                    [void]$sb.Append("    $chaveJson`: $valJson")
-                } catch {
-                    [void]$sb.Append("    $chaveJson`: null")
-                }
-            } else {
-                # arquivo grande ou tipo nao textual -> apenas referencia
-                [void]$sb.Append("    $chaveJson`: null")
-            }
-        }
-
-        [void]$sb.AppendLine("")
-        [void]$sb.AppendLine("  }")
-        [void]$sb.AppendLine("};")
-
-        [System.IO.File]::WriteAllText($jsPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
-
-        # Injeta a referencia ao dados.js no HTML (uma unica vez), antes do </head>
-        $destHtml = Join-Path $Destino 'visualizador.html'
-        if (Test-Path $destHtml) {
-            $htmlAtual = [System.IO.File]::ReadAllText($destHtml, [System.Text.Encoding]::UTF8)
-            if ($htmlAtual -notmatch 'src="dados\.js"') {
-                $htmlAtual = $htmlAtual -replace '</head>', '<script src="dados.js"></script></head>'
-                [System.IO.File]::WriteAllText($destHtml, $htmlAtual, (New-Object System.Text.UTF8Encoding($false)))
-            }
-        }
-        $tam = [math]::Round((Get-Item $jsPath).Length / 1MB, 2)
-        Log "dados.js gerado ($tam MB). Abra visualizador.html com duplo-clique." 'Green'
-    }
-}
-
-$htmlContent = @'
+# ============================================================
+#  TEMPLATE DO VISUALIZADOR HTML (embutido; gravado na raiz da coleta)
+# ============================================================
+$script:htmlContent = @'
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1285,6 +1072,224 @@ if (window.EMBEDDED_DATA && window.EMBEDDED_DATA.files && Object.keys(window.EMB
 </html>
 
 '@
+
+
+$script:Dados      = [ordered]@{}
+$script:Executadas = New-Object System.Collections.ArrayList
+
+function Marcar {
+    param([string]$Nome)
+    if (-not $script:Executadas.Contains($Nome)) { [void]$script:Executadas.Add($Nome) }
+}
+
+$script:LogFile = $null
+$script:LogEnc  = New-Object System.Text.UTF8Encoding($false)
+
+function Log {
+    param([string]$Msg, [string]$Cor = 'Gray')
+    $linha = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Msg
+    Write-Host $linha -ForegroundColor $Cor
+    if ($script:LogFile) {
+        try { [System.IO.File]::AppendAllText($script:LogFile, ($linha + "`r`n"), $script:LogEnc) } catch {}
+    }
+}
+
+function Executar {
+    param(
+        [Parameter(Mandatory)][string]$Nome,
+        [Parameter(Mandatory)][scriptblock]$Bloco,
+        [switch]$Silencioso
+    )
+    try {
+        $resultado = & $Bloco
+        if (-not $Silencioso) { Log "[OK] $Nome" 'Green' }
+        return $resultado
+    } catch {
+        Log "[FALHOU] $Nome -> $($_.Exception.Message)" 'Yellow'
+        return $null
+    }
+}
+
+function Salvar-Json {
+    param($Objeto, [string]$Caminho)
+    if ($null -eq $Objeto) { return }
+    try { $Objeto | ConvertTo-Json -Depth 6 | Out-File -FilePath $Caminho -Encoding UTF8 } catch {}
+}
+
+function Salvar-Csv {
+    param($Objeto, [string]$Caminho)
+    if ($null -eq $Objeto) { return }
+    try { $Objeto | Export-Csv -Path $Caminho -NoTypeInformation -Encoding UTF8 } catch {}
+}
+
+function Escrever-TabelaMd {
+    param([Parameter(Mandatory)]$Campos, [string]$Titulo)
+    $sb = New-Object System.Text.StringBuilder
+    if ($Titulo) { [void]$sb.AppendLine("## $Titulo`n") }
+    [void]$sb.AppendLine("| Campo | Valor |")
+    [void]$sb.AppendLine("| --- | --- |")
+    foreach ($k in $Campos.Keys) {
+        $v = $Campos[$k]
+        if ($null -eq $v -or ($v -is [string] -and $v.Trim() -eq '')) { $v = '-' }
+        [void]$sb.AppendLine("| $k | $v |")
+    }
+    return $sb.ToString()
+}
+
+$script:Pastas    = $null
+$script:WinDrive  = $null
+$script:IsWinPE   = $false
+$script:ModoAoVivo= $false
+$script:AmbienteOk= $false
+
+function Selecionar-DestinoAuto {
+    $cands = @()
+    try {
+        $vols = Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -eq 2 -or $_.DriveType -eq 3 }
+        foreach ($v in $vols) {
+            if ($v.DeviceID -eq 'X:') { continue }
+            if (-not $v.FreeSpace) { continue }
+            $cands += [PSCustomObject]@{ Letra = $v.DeviceID; Livre = [int64]$v.FreeSpace; Tipo = [int]$v.DriveType }
+        }
+    } catch {}
+
+    $cands = $cands | Sort-Object @{ Expression = { if ($_.Tipo -eq 2) { 0 } else { 1 } } }, @{ Expression = { $_.Livre }; Descending = $true }
+
+    foreach ($c in $cands) {
+        if ($c.Livre -lt 200MB) { continue }
+        $teste = Join-Path ($c.Letra + '\') ('._coleta_test_' + $Timestamp)
+        try {
+            New-Item -ItemType Directory -Path $teste -Force -ErrorAction Stop | Out-Null
+            Remove-Item $teste -Recurse -Force -ErrorAction SilentlyContinue
+            $gb = [math]::Round($c.Livre / 1GB, 1)
+            $tipoTxt = if ($c.Tipo -eq 2) { 'USB/Removivel' } else { 'Disco Local' }
+            Log "Destino automatico: $($c.Letra) ($tipoTxt, $gb GB livres)" 'Green'
+            return $c.Letra
+        } catch { continue }
+    }
+    return $null
+}
+
+function Inicializar-Destino {
+    if ($script:Pastas) { return }
+
+    $DriveDestino = $null
+    try { $DriveDestino = (Split-Path -Qualifier $Destino -ErrorAction Stop) } catch {}
+    if (-not $DestinoFoiInformado -and $DriveDestino -eq 'X:') {
+        Write-Host ""
+        Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+        Write-Host "  ALERTA CRITICO: Gravando no ramdisk (X:\) do ambiente WinPE." -ForegroundColor Red
+        Write-Host "  Os dados serao volatilizados no proximo ciclo de energia." -ForegroundColor Red
+        Write-Host "  Recomenda-se selecionar um volume persistente atraves do menu." -ForegroundColor Red
+        Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+        Write-Host ""
+    }
+
+    $script:Pastas = [ordered]@{
+        Resumo    = Join-Path $Destino '00_Resumo'
+        EventLogs = Join-Path $Destino '01_EventLogs'
+        Panther   = Join-Path $Destino '02_Panther'
+        Dumps     = Join-Path $Destino '03_Dumps_e_WER'
+        Boot      = Join-Path $Destino '04_Boot'
+        Registro  = Join-Path $Destino '05_Registro'
+        Hardware  = Join-Path $Destino '06_Hardware'
+        Bateria   = Join-Path $Destino '07_Bateria_BMS'
+        Drivers   = Join-Path $Destino '08_Drivers'
+        Bruto     = Join-Path $Destino '09_Dados_Brutos'
+    }
+    foreach ($p in $script:Pastas.Values) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
+    $script:LogFile = Join-Path $Destino 'coleta_diagnostico.log'
+    Log "Diretorio Alvo: $Destino" 'Cyan'
+    Escrever-Visualizador
+}
+
+function Escrever-Visualizador {
+    <#
+    .SYNOPSIS
+      Grava o visualizador HTML (navegacao completa, tema claro/escuro, estilo shadcn) na raiz do
+      diretorio de coleta, para que va junto no arquivo compactado final.
+    #>
+    if ($script:VisualizadorGravado) { return }
+    $destHtml = Join-Path $Destino 'visualizador.html'
+    Executar "Gravacao do visualizador HTML na raiz da coleta" {
+        $script:htmlContent | Out-File -FilePath $destHtml -Encoding UTF8 -Force
+    } -Silencioso | Out-Null
+    $script:VisualizadorGravado = $true
+}
+
+function Gerar-DadosEmbutidos {
+    <#
+    .SYNOPSIS
+      Varre os arquivos de texto ja coletados (JSON, CSV, MD, TXT, LOG, XML, HTML) e embute o
+      conteudo de todos eles num unico 'dados.js', que define window.EMBEDDED_DATA. Com isso, o
+      visualizador.html abre com duplo-clique e carrega tudo automaticamente, sem o usuario precisar
+      selecionar a pasta. Arquivos binarios (evtx, dmp) sao referenciados como null (metadados apenas).
+    #>
+    Detectar-Ambiente
+    Log ">> Embutindo dados coletados no visualizador (dados.js)..." 'Cyan'
+    $jsPath = Join-Path $Destino 'dados.js'
+
+    $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg')
+    $extBinRef = @('.evtx', '.dmp')          # referenciados, mas conteudo nao embutido
+    $limiteBytes = 6MB                        # trava por arquivo, evita estourar memoria do navegador
+
+    Executar "Serializacao dos artefatos em dados.js" {
+        $baseLen = $Destino.TrimEnd('\').Length + 1
+        $rootName = Split-Path $Destino -Leaf
+
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("window.EMBEDDED_DATA = {")
+        [void]$sb.AppendLine("  rootName: $($rootName | ConvertTo-Json),")
+        [void]$sb.AppendLine("  files: {")
+
+        $arquivos = Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'dados.js' -and $_.Name -ne 'visualizador.html' }
+
+        $primeiro = $true
+        foreach ($arq in $arquivos) {
+            $rel = ($rootName + '\' + $arq.FullName.Substring($baseLen)) -replace '\\', '/'
+            $ext = $arq.Extension.ToLower()
+            $chaveJson = $rel | ConvertTo-Json
+
+            if (-not $primeiro) { [void]$sb.AppendLine(",") }
+            $primeiro = $false
+
+            if ($extBinRef -contains $ext) {
+                [void]$sb.Append("    $chaveJson`: null")
+            } elseif (($extTexto -contains $ext) -and ($arq.Length -le $limiteBytes)) {
+                try {
+                    $conteudo = [System.IO.File]::ReadAllText($arq.FullName, [System.Text.Encoding]::UTF8)
+                    $valJson = $conteudo | ConvertTo-Json
+                    [void]$sb.Append("    $chaveJson`: $valJson")
+                } catch {
+                    [void]$sb.Append("    $chaveJson`: null")
+                }
+            } else {
+                # arquivo grande ou tipo nao textual -> apenas referencia
+                [void]$sb.Append("    $chaveJson`: null")
+            }
+        }
+
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("  }")
+        [void]$sb.AppendLine("};")
+
+        [System.IO.File]::WriteAllText($jsPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+
+        # Injeta a referencia ao dados.js no HTML (uma unica vez), antes do </head>
+        $destHtml = Join-Path $Destino 'visualizador.html'
+        if (Test-Path $destHtml) {
+            $htmlAtual = [System.IO.File]::ReadAllText($destHtml, [System.Text.Encoding]::UTF8)
+            if ($htmlAtual -notmatch 'src="dados\.js"') {
+                $htmlAtual = $htmlAtual -replace '</head>', '<script src="dados.js"></script></head>'
+                [System.IO.File]::WriteAllText($destHtml, $htmlAtual, (New-Object System.Text.UTF8Encoding($false)))
+            }
+        }
+        $tam = [math]::Round((Get-Item $jsPath).Length / 1MB, 2)
+        Log "dados.js gerado ($tam MB). Abra visualizador.html com duplo-clique." 'Green'
+    }
+}
+
 
 function Detectar-Ambiente {
     if ($script:AmbienteOk) { return }
