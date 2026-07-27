@@ -40,50 +40,35 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$DestinoFoiInformado =$PSBoundParameters.ContainsKey('Destino')
+$DestinoFoiInformado = $PSBoundParameters.ContainsKey('Destino')
 
-# Determina o diretório de execução base dependendo do contexto de invocação (local ou web).
-$ScriptRoot =$null
-$ScriptPath =$MyInvocation.MyCommand.Path
-if ($ScriptPath) { $ScriptRoot = Split-Path -Parent$ScriptPath }
-if (-not $ScriptRoot) { $ScriptRoot = (Get-Location).Path }$Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$ScriptRoot = $null
+$ScriptPath = $MyInvocation.MyCommand.Path
+if ($ScriptPath) { $ScriptRoot = Split-Path -Parent $ScriptPath }
+if (-not $ScriptRoot) { $ScriptRoot = (Get-Location).Path }
+$Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
-# Estruturas de controle de estado em memória.
-$script:Dados      = [ordered]@{}$script:Executadas = New-Object System.Collections.ArrayList
+$script:Dados      = [ordered]@{}
+$script:Executadas = New-Object System.Collections.ArrayList
 
 function Marcar {
-    <#
-    .SYNOPSIS
-      Registra a conclusão de um módulo na lista de tarefas executadas.
-    #>
     param([string]$Nome)
     if (-not $script:Executadas.Contains($Nome)) { [void]$script:Executadas.Add($Nome) }
 }
 
-# ============================================================
-#  MÓDULOS DE SAÍDA E MANIPULAÇÃO DE DADOS
-# ============================================================
-$script:LogFile =$null
+$script:LogFile = $null
 $script:LogEnc  = New-Object System.Text.UTF8Encoding($false)
 
 function Log {
-    <#
-    .SYNOPSIS
-      Emite registros no console e persiste no arquivo log central.
-    #>
     param([string]$Msg, [string]$Cor = 'Gray')
     $linha = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Msg
-    Write-Host $linha -ForegroundColor$Cor
+    Write-Host $linha -ForegroundColor $Cor
     if ($script:LogFile) {
         try { [System.IO.File]::AppendAllText($script:LogFile, ($linha + "`r`n"), $script:LogEnc) } catch {}
     }
 }
 
 function Executar {
-    <#
-    .SYNOPSIS
-      Invólucro para blocos de execução com tratamento de exceções.
-    #>
     param(
         [Parameter(Mandatory)][string]$Nome,
         [Parameter(Mandatory)][scriptblock]$Bloco,
@@ -100,76 +85,59 @@ function Executar {
 }
 
 function Salvar-Json {
-    <#
-    .SYNOPSIS
-      Serializa objetos em formato JSON UTF-8.
-    #>
     param($Objeto, [string]$Caminho)
     if ($null -eq $Objeto) { return }
     try { $Objeto | ConvertTo-Json -Depth 6 | Out-File -FilePath $Caminho -Encoding UTF8 } catch {}
 }
 
 function Salvar-Csv {
-    <#
-    .SYNOPSIS
-      Exporta coleções de objetos para formato CSV UTF-8.
-    #>
     param($Objeto, [string]$Caminho)
     if ($null -eq $Objeto) { return }
     try { $Objeto | Export-Csv -Path $Caminho -NoTypeInformation -Encoding UTF8 } catch {}
 }
 
 function Escrever-TabelaMd {
-    <#
-    .SYNOPSIS
-      Gera uma tabela Markdown formatada a partir de propriedades de objeto.
-    #>
     param([Parameter(Mandatory)]$Campos, [string]$Titulo)
     $sb = New-Object System.Text.StringBuilder
     if ($Titulo) { [void]$sb.AppendLine("## $Titulo`n") }
     [void]$sb.AppendLine("| Campo | Valor |")
     [void]$sb.AppendLine("| --- | --- |")
-    foreach ($k in $Campos.Keys) {$v = $Campos[$k]
-        if ($null -eq $v -or ($v -is [string] -and $v.Trim() -eq '')) {$v = '-' }
-        [void]$sb.AppendLine("| $k \vert{}$v |")
+    foreach ($k in $Campos.Keys) {
+        $v = $Campos[$k]
+        if ($null -eq $v -or ($v -is [string] -and $v.Trim() -eq '')) { $v = '-' }
+        [void]$sb.AppendLine("| $k | $v |")
     }
     return $sb.ToString()
 }
 
-# ============================================================
-#  INICIALIZAÇÃO DE AMBIENTE E SISTEMA DE ARQUIVOS
-# ============================================================
-$script:Pastas    =$null
-$script:WinDrive  =$null
-$script:IsWinPE   =$false
-$script:ModoAoVivo=$false
-$script:AmbienteOk=$false
+$script:Pastas    = $null
+$script:WinDrive  = $null
+$script:IsWinPE   = $false
+$script:ModoAoVivo= $false
+$script:AmbienteOk= $false
 
 function Selecionar-DestinoAuto {
-    <#
-    .SYNOPSIS
-      Seleciona automaticamente o volume mais apropriado para a gravação da coleta, evitando ramdisks.
-    #>
     $cands = @()
     try {
-        $vols = Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -eq 2 -or$_.DriveType -eq 3 }
-        foreach ($v in$vols) {
+        $vols = Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -eq 2 -or $_.DriveType -eq 3 }
+        foreach ($v in $vols) {
             if ($v.DeviceID -eq 'X:') { continue }
             if (-not $v.FreeSpace) { continue }
-            $cands += [PSCustomObject]@{ Letra =$v.DeviceID; Livre = [int64]$v.FreeSpace; Tipo = [int]$v.DriveType }
+            $cands += [PSCustomObject]@{ Letra = $v.DeviceID; Livre = [int64]$v.FreeSpace; Tipo = [int]$v.DriveType }
         }
     } catch {}
 
-    $cands = $cands \vert{} Sort-Object @{ Expression = { if ($_.Tipo -eq 2) { 0 } else { 1 } } }, @{ Expression = { $_.Livre }; Descending =$true }
+    $cands = $cands | Sort-Object @{ Expression = { if ($_.Tipo -eq 2) { 0 } else { 1 } } }, @{ Expression = { $_.Livre }; Descending = $true }
 
-    foreach ($c in$cands) {
-        if ($c.Livre -lt 200MB) { continue }$teste = Join-Path ($c.Letra + '\') ('._coleta_test_' +$Timestamp)
+    foreach ($c in $cands) {
+        if ($c.Livre -lt 200MB) { continue }
+        $teste = Join-Path ($c.Letra + '\') ('._coleta_test_' + $Timestamp)
         try {
             New-Item -ItemType Directory -Path $teste -Force -ErrorAction Stop | Out-Null
             Remove-Item $teste -Recurse -Force -ErrorAction SilentlyContinue
             $gb = [math]::Round($c.Livre / 1GB, 1)
             $tipoTxt = if ($c.Tipo -eq 2) { 'USB/Removivel' } else { 'Disco Local' }
-            Log "Destino automatico: $($c.Letra) ($tipoTxt,$gb GB livres)" 'Green'
+            Log "Destino automatico: $($c.Letra) ($tipoTxt, $gb GB livres)" 'Green'
             return $c.Letra
         } catch { continue }
     }
@@ -177,15 +145,11 @@ function Selecionar-DestinoAuto {
 }
 
 function Inicializar-Destino {
-    <#
-    .SYNOPSIS
-      Gera a árvore de diretórios estruturada para os artefatos de coleta.
-    #>
     if ($script:Pastas) { return }
 
-    $DriveDestino =$null
-    try { $DriveDestino = (Split-Path -Qualifier$Destino -ErrorAction Stop) } catch {}
-    if (-not $DestinoFoiInformado -and$DriveDestino -eq 'X:') {
+    $DriveDestino = $null
+    try { $DriveDestino = (Split-Path -Qualifier $Destino -ErrorAction Stop) } catch {}
+    if (-not $DestinoFoiInformado -and $DriveDestino -eq 'X:') {
         Write-Host ""
         Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
         Write-Host "  ALERTA CRITICO: Gravando no ramdisk (X:\) do ambiente WinPE." -ForegroundColor Red
@@ -207,45 +171,39 @@ function Inicializar-Destino {
         Drivers   = Join-Path $Destino '08_Drivers'
         Bruto     = Join-Path $Destino '09_Dados_Brutos'
     }
-    foreach ($p in $script:Pastas.Values) { New-Item -ItemType Directory -Force -Path$p | Out-Null }
-    $script:LogFile = Join-Path$Destino 'coleta_diagnostico.log'
+    foreach ($p in $script:Pastas.Values) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
+    $script:LogFile = Join-Path $Destino 'coleta_diagnostico.log'
     Log "Diretorio Alvo: $Destino" 'Cyan'
 }
 
 function Detectar-Ambiente {
-    <#
-    .SYNOPSIS
-      Analisa o volume de sistema atual para identificar se a execução é online ou em ambiente pre-boot.
-    #>
     if ($script:AmbienteOk) { return }
     Inicializar-Destino
 
-    $RunningDrive =$env:SystemDrive
-    $script:IsWinPE =$false
+    $RunningDrive = $env:SystemDrive
+    $script:IsWinPE = $false
     try {
         $script:IsWinPE = ($RunningDrive -eq 'X:') -or (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT')
     } catch {}
 
     Log "Inspecionando estrutura de particoes do Windows..." 'Cyan'
-    $script:WinDrive =$null
-    foreach ($letra in 67..90 \vert{} ForEach-Object { [char]$_ }) {
+    $script:WinDrive = $null
+    foreach ($letra in 67..90 | ForEach-Object { [char]$_ }) {
         $candidato = "$letra`:\Windows\System32\config\SYSTEM"
         if (Test-Path $candidato) { $script:WinDrive = "$letra`:"; break }
     }
 
-    $script:ModoAoVivo = (-not $script:IsWinPE) -and$script:WinDrive -and ($script:WinDrive -eq$RunningDrive)
+    $script:ModoAoVivo = (-not $script:IsWinPE) -and $script:WinDrive -and ($script:WinDrive -eq $RunningDrive)
 
-    if (-not $script:WinDrive) {         Log "[ERRO] Sistema Operacional base nao localizado. Modulos limitados a inspecao de hardware." 'Red'     } elseif ($script:ModoAoVivo) {
+    if (-not $script:WinDrive) {
+        Log "[ERRO] Sistema Operacional base nao localizado. Modulos limitados a inspecao de hardware." 'Red'
+    } elseif ($script:ModoAoVivo) {
         Log "Windows ativo identificado no volume $($script:WinDrive) (Modo Online)" 'Green'
     } else {
         Log "Windows inativo identificado no volume $($script:WinDrive) (Modo Offline)" 'Green'
     }
-    $script:AmbienteOk =$true
+    $script:AmbienteOk = $true
 }
-
-# ============================================================
-#  MÓDULOS DE COLETA DE DADOS
-# ============================================================
 
 function Coletar-EventLogs {
     Detectar-Ambiente
@@ -285,17 +243,18 @@ function Coletar-Boot {
     }
     Executar "Coleta da trilha de diagnostico do Startup Repair (SrtTrail.txt)" {
         $srt = "$($script:WinDrive)\Windows\System32\LogFiles\Srt\SrtTrail.txt"
-        if (Test-Path $srt) { Copy-Item $srt$script:Pastas.Boot -Force -ErrorAction Stop }
+        if (Test-Path $srt) { Copy-Item $srt $script:Pastas.Boot -Force -ErrorAction Stop }
     }
 
-    $SystemEvtx = Join-Path$script:Pastas.EventLogs 'System.evtx'
-    if (Test-Path $SystemEvtx) {$ev = Executar "Mineracao de eventos de falha de kernel e desligamento" {
+    $SystemEvtx = Join-Path $script:Pastas.EventLogs 'System.evtx'
+    if (Test-Path $SystemEvtx) {
+        $ev = Executar "Mineracao de eventos de falha de kernel e desligamento" {
             Get-WinEvent -FilterHashtable @{ Path = $SystemEvtx; Id = 41,1001,6008 } -ErrorAction Stop |
                 Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message |
                 Sort-Object TimeCreated -Descending
         }
         if ($ev) {
-            Salvar-Csv $ev (Join-Path$script:Pastas.Boot 'eventos_criticos_desligamento.csv')
+            Salvar-Csv $ev (Join-Path $script:Pastas.Boot 'eventos_criticos_desligamento.csv')
             $script:Dados['nCriticos'] = ($ev | Measure-Object).Count
         }
     } else {
@@ -328,9 +287,10 @@ function Coletar-Dumps {
             "$($script:WinDrive)\ProgramData\Microsoft\Windows\WER\ReportArchive",
             "$($script:WinDrive)\ProgramData\Microsoft\Windows\WER\ReportQueue"
         )
-        foreach ($wp in$werPaths) {
-            if (Test-Path $wp) {$destWer = Join-Path $script:Pastas.Dumps ("WER_" + (Split-Path $wp -Leaf))
-                Copy-Item $wp$destWer -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($wp in $werPaths) {
+            if (Test-Path $wp) {
+                $destWer = Join-Path $script:Pastas.Dumps ("WER_" + (Split-Path $wp -Leaf))
+                Copy-Item $wp $destWer -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -348,18 +308,19 @@ function Coletar-Registro {
         param([string]$RaizSoftware, [string]$RaizSystemCS)
         try {
             $cv = Get-ItemProperty "$RaizSoftware\Microsoft\Windows NT\CurrentVersion" -ErrorAction Stop
-            $InfoWindowsInstalado['Produto'] =$cv.ProductName
-            $InfoWindowsInstalado['Versao'] = if ($cv.DisplayVersion) {$cv.DisplayVersion } else { $cv.ReleaseId }$InfoWindowsInstalado['Build'] = "$($cv.CurrentBuild).$($cv.UBR)"
+            $InfoWindowsInstalado['Produto'] = $cv.ProductName
+            $InfoWindowsInstalado['Versao'] = if ($cv.DisplayVersion) { $cv.DisplayVersion } else { $cv.ReleaseId }
+            $InfoWindowsInstalado['Build'] = "$($cv.CurrentBuild).$($cv.UBR)"
             $InfoWindowsInstalado['Instalado em'] = if ($cv.InstallDate) { [DateTimeOffset]::FromUnixTimeSeconds([int64]$cv.InstallDate).LocalDateTime } else { '-' }
-            $InfoWindowsInstalado['Dono registrado'] =$cv.RegisteredOwner
+            $InfoWindowsInstalado['Dono registrado'] = $cv.RegisteredOwner
             Log "[OK] Leitura das subchaves de versao e build do sistema" 'Green'
         } catch { Log "[FALHOU] Falha na leitura de versao -> $($_.Exception.Message)" 'Yellow' }
 
         try {
             $cn = Get-ItemProperty "$RaizSystemCS\Control\ComputerName\ComputerName" -ErrorAction SilentlyContinue
-            if ($cn) { $InfoWindowsInstalado['Nome do computador'] =$cn.ComputerName }
+            if ($cn) { $InfoWindowsInstalado['Nome do computador'] = $cn.ComputerName }
             $win = Get-ItemProperty "$RaizSystemCS\Control\Windows" -ErrorAction SilentlyContinue
-            if ($win -and$win.ShutdownTime) {
+            if ($win -and $win.ShutdownTime) {
                 try {
                     $filetime = [BitConverter]::ToInt64([byte[]]$win.ShutdownTime, 0)
                     $InfoWindowsInstalado['Ultimo desligamento registrado'] = [DateTime]::FromFileTime($filetime)
@@ -388,28 +349,29 @@ function Coletar-Registro {
             'HKLM\VC_SOFTWARE' = "$($script:WinDrive)\Windows\System32\config\SOFTWARE"
         }
         $hivesMontados = @()
-        foreach ($chave in$hives.Keys) {
-            $arq =$hives[$chave]$ok = Executar "Montagem da estrutura binaria $chave" {
-                $saida = & reg load $chave$arq 2>&1
+        foreach ($chave in $hives.Keys) {
+            $arq = $hives[$chave]
+            $ok = Executar "Montagem da estrutura binaria $chave" {
+                $saida = & reg load $chave $arq 2>&1
                 if ($LASTEXITCODE -ne 0) { throw "Codigo de integridade $LASTEXITCODE retornado no sub-processo ($saida)" }
                 $true
             }
-            if ($ok) { $hivesMontados +=$chave }
+            if ($ok) { $hivesMontados += $chave }
         }
 
         $cs = 'ControlSet001'
         try {
             $sel = Get-ItemProperty 'HKLM:\VC_SYSTEM\Select' -ErrorAction Stop
-            $cs = 'ControlSet{0:D3}' -f$sel.Current
+            $cs = 'ControlSet{0:D3}' -f $sel.Current
         } catch {}
-        $InfoWindowsInstalado['ControlSet atual'] =$cs
+        $InfoWindowsInstalado['ControlSet atual'] = $cs
 
         & $lerInfo 'HKLM:\VC_SOFTWARE' "HKLM:\VC_SYSTEM\$cs"
 
         Executar "Parser de chaves de servicos em modo offline" {
             Get-ChildItem "HKLM:\VC_SYSTEM\$cs\Services" -ErrorAction Stop |
                 ForEach-Object {
-                    $p = Get-ItemProperty$_.PSPath -ErrorAction SilentlyContinue
+                    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
                     [PSCustomObject]@{
                         Servico   = $_.PSChildName
                         Start     = $p.Start
@@ -419,7 +381,7 @@ function Coletar-Registro {
                 } | Export-Csv (Join-Path $script:Pastas.Registro 'servicos.csv') -NoTypeInformation -Encoding UTF8
         }
 
-        foreach ($chave in$hivesMontados) {
+        foreach ($chave in $hivesMontados) {
             Executar "Desmontagem segura da unidade binaria $chave" {
                 [gc]::Collect(); [gc]::WaitForPendingFinalizers()
                 & reg unload $chave 2>&1 | Out-Null
@@ -430,7 +392,7 @@ function Coletar-Registro {
     if ($InfoWindowsInstalado.Count -gt 0) {
         Escrever-TabelaMd -Campos $InfoWindowsInstalado -Titulo 'Windows instalado' |
             Out-File (Join-Path $script:Pastas.Registro 'RESUMO_REGISTRO.md') -Encoding UTF8
-        $script:Dados['InfoWindows'] =$InfoWindowsInstalado
+        $script:Dados['InfoWindows'] = $InfoWindowsInstalado
     }
     Marcar 'Registro'
 }
@@ -448,28 +410,30 @@ function Coletar-Hardware {
     $DISK    = Executar "Controladores e Discos Fisicos" { Get-CimInstance Win32_DiskDrive -ErrorAction Stop }
     $PART    = Executar "Tabelas de Particao" { Get-CimInstance Win32_DiskPartition -ErrorAction Stop }
     $VID     = Executar "Aceleradores Graficos" { Get-CimInstance Win32_VideoController -ErrorAction Stop }
-    $NET     = Executar "Interfaces de Rede" { Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop | Where-Object { $_.MACAddress } }$PNP_ERR = Executar "Barramento PnP e Conflitos" {
+    $NET     = Executar "Interfaces de Rede" { Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop | Where-Object { $_.MACAddress } }
+    $PNP_ERR = Executar "Barramento PnP e Conflitos" {
         Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.ConfigManagerErrorCode -and $_.ConfigManagerErrorCode -ne 0 }
-    }$TPM     = Executar "Cripto-processador (TPM)" { Get-Tpm -ErrorAction Stop }
+    }
+    $TPM     = Executar "Cripto-processador (TPM)" { Get-Tpm -ErrorAction Stop }
     $SB      = Executar "Validacao Secure Boot" { Confirm-SecureBootUEFI -ErrorAction Stop }
     $SMART   = Executar "Telemetria de Confiabilidade SMART" {
         Get-PhysicalDisk -ErrorAction Stop | Get-StorageReliabilityCounter -ErrorAction Stop
     }
 
-    Salvar-Json $CS    (Join-Path$script:Pastas.Bruto 'computer_system.json')
-    Salvar-Json $CSP   (Join-Path$script:Pastas.Bruto 'computer_system_product.json')
-    Salvar-Json $BIOS  (Join-Path$script:Pastas.Bruto 'bios.json')
-    Salvar-Json $BB    (Join-Path$script:Pastas.Bruto 'baseboard.json')
-    Salvar-Csv  $CPU   (Join-Path$script:Pastas.Bruto 'cpu.csv')
-    Salvar-Csv  $MEM   (Join-Path$script:Pastas.Bruto 'memoria.csv')
-    Salvar-Csv  $DISK  (Join-Path$script:Pastas.Bruto 'discos.csv')
-    Salvar-Csv  $PART  (Join-Path$script:Pastas.Bruto 'particoes.csv')
-    Salvar-Csv  $VID   (Join-Path$script:Pastas.Bruto 'video.csv')
-    Salvar-Csv  $NET   (Join-Path$script:Pastas.Bruto 'rede.csv')
-    Salvar-Csv  $PNP_ERR (Join-Path$script:Pastas.Bruto 'dispositivos_com_erro.csv')
-    Salvar-Csv  $SMART (Join-Path$script:Pastas.Bruto 'smart_confiabilidade.csv')
+    Salvar-Json $CS    (Join-Path $script:Pastas.Bruto 'computer_system.json')
+    Salvar-Json $CSP   (Join-Path $script:Pastas.Bruto 'computer_system_product.json')
+    Salvar-Json $BIOS  (Join-Path $script:Pastas.Bruto 'bios.json')
+    Salvar-Json $BB    (Join-Path $script:Pastas.Bruto 'baseboard.json')
+    Salvar-Csv  $CPU   (Join-Path $script:Pastas.Bruto 'cpu.csv')
+    Salvar-Csv  $MEM   (Join-Path $script:Pastas.Bruto 'memoria.csv')
+    Salvar-Csv  $DISK  (Join-Path $script:Pastas.Bruto 'discos.csv')
+    Salvar-Csv  $PART  (Join-Path $script:Pastas.Bruto 'particoes.csv')
+    Salvar-Csv  $VID   (Join-Path $script:Pastas.Bruto 'video.csv')
+    Salvar-Csv  $NET   (Join-Path $script:Pastas.Bruto 'rede.csv')
+    Salvar-Csv  $PNP_ERR (Join-Path $script:Pastas.Bruto 'dispositivos_com_erro.csv')
+    Salvar-Csv  $SMART (Join-Path $script:Pastas.Bruto 'smart_confiabilidade.csv')
 
-    $RamTotalGB = if ($MEM) { [math]::Round(($MEM | Measure-Object Capacity -Sum).Sum / 1GB, 1) } else {$null }
+    $RamTotalGB = if ($MEM) { [math]::Round(($MEM | Measure-Object Capacity -Sum).Sum / 1GB, 1) } else { $null }
 
     $ResumoHardware = [ordered]@{
         'Fabricante'           = $CS.Manufacturer
@@ -483,16 +447,16 @@ function Coletar-Hardware {
         'RAM total'            = "$RamTotalGB GB ($(($MEM | Measure-Object).Count) pente(s))"
         'Discos'               = ($DISK | ForEach-Object { "$($_.Model) ($([math]::Round($_.Size/1GB,0)) GB)" }) -join '; '
         'GPU'                  = ($VID | Select-Object -First 1).Name
-        'TPM presente'         = if ($TPM) {$TPM.TpmPresent } else { '-' }
-        'TPM pronto'           = if ($TPM) {$TPM.TpmReady } else { '-' }
-        'Secure Boot ativo'    = if ($null -ne $SB) {$SB } else { '-' }
+        'TPM presente'         = if ($TPM) { $TPM.TpmPresent } else { '-' }
+        'TPM pronto'           = if ($TPM) { $TPM.TpmReady } else { '-' }
+        'Secure Boot ativo'    = if ($null -ne $SB) { $SB } else { '-' }
         'Dispositivos com erro'= if ($PNP_ERR) { ($PNP_ERR | Measure-Object).Count } else { 0 }
     }
     Escrever-TabelaMd -Campos $ResumoHardware -Titulo 'Inventario de Hardware' |
         Out-File (Join-Path $script:Pastas.Hardware 'RESUMO_HARDWARE.md') -Encoding UTF8
 
     if ($PNP_ERR) {
-        $linhasErro =$PNP_ERR | ForEach-Object { "- **$($_.Name)** - codigo $($_.ConfigManagerErrorCode) ($($_.DeviceID))" }
+        $linhasErro = $PNP_ERR | ForEach-Object { "- **$($_.Name)** - codigo $($_.ConfigManagerErrorCode) ($($_.DeviceID))" }
         "## Dispositivos com erro de barramento`n`n$($linhasErro -join "`n")" |
             Out-File (Join-Path $script:Pastas.Hardware 'dispositivos_com_erro.md') -Encoding UTF8
     }
@@ -511,10 +475,6 @@ function Coletar-Hardware {
 }
 
 function Invoke-PowercfgSeguro {
-    <#
-    .SYNOPSIS
-      Executa o utilitário powercfg com limites de timeout rigorosos. Prevê casos de congelamento em comunicação I2C/SMBus.
-    #>
     param([string]$ArgLinha, [int]$TimeoutSeg = 30)
     try {
         $p = Start-Process -FilePath 'powercfg' -ArgumentList $ArgLinha -PassThru -WindowStyle Hidden -ErrorAction Stop
@@ -527,10 +487,6 @@ function Invoke-PowercfgSeguro {
 }
 
 function Parse-BatteryReportXml {
-    <#
-    .SYNOPSIS
-      Desestrutura o relatório XML de bateria independente de namespace XML.
-    #>
     param([string]$XmlPath)
     if (-not (Test-Path $XmlPath)) { return $null }
     try { [xml]$doc = Get-Content $XmlPath -Raw -ErrorAction Stop } catch { return $null }
@@ -563,10 +519,6 @@ function Parse-BatteryReportXml {
 }
 
 function Parse-HtmlSectionRows {
-    <#
-    .SYNOPSIS
-      Analisa estrutura de tabelas em documentos HTML para extração de arrays limpos.
-    #>
     param([string]$Html, [string]$StartRegex, [string]$EndRegex)
     $out = @()
     if (-not $Html) { return $out }
@@ -606,7 +558,7 @@ function Coletar-Bateria {
     $xmlPath    = Join-Path $script:Pastas.Bateria 'battery-report.xml'
     $energyPath = Join-Path $script:Pastas.Bateria 'energy-report.html'
     $stBatHtml = '-'; $stBatXml = '-'; $stEnergy = '-'
-    
+
     if ($script:ModoAoVivo) {
         Log "Submetendo comandos nativos de diagnóstico powercfg..." 'Cyan'
         $stBatHtml = Invoke-PowercfgSeguro "/batteryreport /output `"$htmlPath`"" 30
@@ -703,7 +655,7 @@ function Coletar-Bateria {
     [void]$mb.AppendLine("| battery-report.xml  | $stBatXml |")
     [void]$mb.AppendLine("| energy-report.html  | $stEnergy |")
     [void]$mb.AppendLine("")
-    
+
     $temBateria = [bool]$BatWin32
     $runTime = ($BatWin32 | Select-Object -First 1).EstimatedRunTime
     $ResumoBateria = [ordered]@{
@@ -795,15 +747,7 @@ function Coletar-Drivers {
     Marcar 'Drivers'
 }
 
-# ============================================================
-#  EXPORTAÇÃO DE DADOS MESTRE
-# ============================================================
-
 function Gerar-ArquivoJson {
-    <#
-    .SYNOPSIS
-      Exporta todos os conjuntos de dados carregados na memória do script para um JSON mestre padronizado.
-    #>
     Detectar-Ambiente
     Log ">> Iniciando compilação do arquivo estruturado (JSON)..." 'Cyan'
     $JsonPath = Join-Path $script:Pastas.Resumo 'coleta_consolidada.json'
@@ -900,7 +844,7 @@ function Gerar-ResumoGeral {
             [void]$md.AppendLine("- $($d.Model) - $([math]::Round($d.Size/1GB,0)) GB, Firmware Report: $($d.Status)")
         }
     }
-    
+
     $md.ToString() | Out-File (Join-Path $script:Pastas.Resumo 'RESUMO_GERAL.md') -Encoding UTF8
 }
 
@@ -952,10 +896,6 @@ function Coletar-Completa {
     Gerar-ArquivoJson
     if (-not $SemZip) { Compactar-Zip }
 }
-
-# ============================================================
-#  ROTEAMENTO DE MENU INTERATIVO E EXECUÇÃO
-# ============================================================
 
 function Executar-Tarefa {
     param([string]$Nome)
@@ -1048,9 +988,6 @@ function Loop-Menu {
     }
 }
 
-# ============================================================
-#  INICIALIZAÇÃO BASE E DISPATCHER DE ARGUMENTOS
-# ============================================================
 if (-not $Destino) {
     $raizAuto = Selecionar-DestinoAuto
     if ($raizAuto) {
