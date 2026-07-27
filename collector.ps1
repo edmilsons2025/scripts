@@ -350,7 +350,7 @@ function icon(name, extra){ return '<svg viewBox="0 0 24 24" fill="none" stroke=
 
 /* ============================================================
    MODO EMBUTIDO
-   Se um arquivo dados.js (gerado pelo script de coleta) estiver ao lado
+   O proprio script de coleta injeta os dados diretamente neste arquivo (bloco
    deste HTML, ele define window.EMBEDDED_DATA = { rootName, files: {rel: conteudo} }.
    Nesse caso o visualizador carrega tudo automaticamente, sem pedir a pasta.
 ============================================================ */
@@ -1050,7 +1050,7 @@ async function exportMarkdown(){
 document.getElementById('mdBtn').addEventListener('click', exportMarkdown);
 
 /* ============================================================
-   BOOT: modo embutido (dados.js) ou seleção manual de pasta
+   BOOT: modo embutido (dados inline) ou selecao manual de pasta
 ============================================================ */
 function startEmbedded(){
   EMBEDDED = window.EMBEDDED_DATA;
@@ -1206,44 +1206,47 @@ function Inicializar-Destino {
 function Escrever-Visualizador {
     <#
     .SYNOPSIS
-      Grava o visualizador HTML (navegacao completa, tema claro/escuro, estilo shadcn) na raiz do
-      diretorio de coleta, para que va junto no arquivo compactado final.
+      Grava o visualizador HTML (apenas o template, sem dados ainda) na raiz do diretorio de coleta.
+      E chamada logo na criacao das pastas, para que exista um arquivo desde o inicio da execucao
+      mesmo que o script seja interrompido no meio da coleta. E sempre sobrescrita (idempotente) -
+      nao ha flag de "ja gravado", entao funciona corretamente mesmo se o destino for alterado
+      durante a execucao (opcao [D] do menu).
     #>
-    if ($script:VisualizadorGravado) { return }
     $destHtml = Join-Path $Destino 'visualizador.html'
     Executar "Gravacao do visualizador HTML na raiz da coleta" {
-        $script:htmlContent | Out-File -FilePath $destHtml -Encoding UTF8 -Force
+        [System.IO.File]::WriteAllText($destHtml, $script:htmlContent, (New-Object System.Text.UTF8Encoding($false)))
     } -Silencioso | Out-Null
-    $script:VisualizadorGravado = $true
 }
 
-function Gerar-DadosEmbutidos {
+function Finalizar-Visualizador {
     <#
     .SYNOPSIS
-      Varre os arquivos de texto ja coletados (JSON, CSV, MD, TXT, LOG, XML, HTML) e embute o
-      conteudo de todos eles num unico 'dados.js', que define window.EMBEDDED_DATA. Com isso, o
-      visualizador.html abre com duplo-clique e carrega tudo automaticamente, sem o usuario precisar
-      selecionar a pasta. Arquivos binarios (evtx, dmp) sao referenciados como null (metadados apenas).
+      Reescreve o visualizador.html incluindo, dentro do proprio arquivo, todos os dados ja
+      coletados ate o momento (JSON, CSV, MD, TXT, LOG, XML). Resultado: um UNICO arquivo HTML
+      autocontido na raiz da coleta - abre com duplo-clique e ja mostra os dados, sem selecionar
+      pasta e sem depender de nenhum outro arquivo auxiliar. Arquivos binarios (evtx, dmp) ou
+      maiores que o limite ficam apenas referenciados (nome/tamanho), nao embutidos.
     #>
     Detectar-Ambiente
-    Log ">> Embutindo dados coletados no visualizador (dados.js)..." 'Cyan'
-    $jsPath = Join-Path $Destino 'dados.js'
+    Log ">> Gerando visualizador.html autocontido (dados embutidos)..." 'Cyan'
+    $destHtml = Join-Path $Destino 'visualizador.html'
 
     $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg')
-    $extBinRef = @('.evtx', '.dmp')          # referenciados, mas conteudo nao embutido
-    $limiteBytes = 6MB                        # trava por arquivo, evita estourar memoria do navegador
+    $extBinRef = @('.evtx', '.dmp')
+    $limiteBytes = 6MB
 
-    Executar "Serializacao dos artefatos em dados.js" {
+    Executar "Incorporacao dos dados coletados diretamente no HTML" {
         $baseLen = $Destino.TrimEnd('\').Length + 1
         $rootName = Split-Path $Destino -Leaf
 
         $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("<script>")
         [void]$sb.AppendLine("window.EMBEDDED_DATA = {")
         [void]$sb.AppendLine("  rootName: $($rootName | ConvertTo-Json),")
         [void]$sb.AppendLine("  files: {")
 
         $arquivos = Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne 'dados.js' -and $_.Name -ne 'visualizador.html' }
+            Where-Object { $_.Name -ne 'visualizador.html' }
 
         $primeiro = $true
         foreach ($arq in $arquivos) {
@@ -1265,7 +1268,6 @@ function Gerar-DadosEmbutidos {
                     [void]$sb.Append("    $chaveJson`: null")
                 }
             } else {
-                # arquivo grande ou tipo nao textual -> apenas referencia
                 [void]$sb.Append("    $chaveJson`: null")
             }
         }
@@ -1273,20 +1275,16 @@ function Gerar-DadosEmbutidos {
         [void]$sb.AppendLine("")
         [void]$sb.AppendLine("  }")
         [void]$sb.AppendLine("};")
+        [void]$sb.AppendLine("</script>")
 
-        [System.IO.File]::WriteAllText($jsPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+        # Monta o HTML final: template limpo + bloco de dados injetado antes de </head>.
+        # Sempre parte do $script:htmlContent original (nao do arquivo em disco), para nunca
+        # acumular injeções duplicadas mesmo se a funcao rodar varias vezes na mesma coleta.
+        $htmlFinal = $script:htmlContent -replace '</head>', ($sb.ToString() + '</head>')
+        [System.IO.File]::WriteAllText($destHtml, $htmlFinal, (New-Object System.Text.UTF8Encoding($false)))
 
-        # Injeta a referencia ao dados.js no HTML (uma unica vez), antes do </head>
-        $destHtml = Join-Path $Destino 'visualizador.html'
-        if (Test-Path $destHtml) {
-            $htmlAtual = [System.IO.File]::ReadAllText($destHtml, [System.Text.Encoding]::UTF8)
-            if ($htmlAtual -notmatch 'src="dados\.js"') {
-                $htmlAtual = $htmlAtual -replace '</head>', '<script src="dados.js"></script></head>'
-                [System.IO.File]::WriteAllText($destHtml, $htmlAtual, (New-Object System.Text.UTF8Encoding($false)))
-            }
-        }
-        $tam = [math]::Round((Get-Item $jsPath).Length / 1MB, 2)
-        Log "dados.js gerado ($tam MB). Abra visualizador.html com duplo-clique." 'Green'
+        $tam = [math]::Round((Get-Item $destHtml).Length / 1MB, 2)
+        Log "visualizador.html atualizado com os dados coletados ($tam MB). Abra com duplo-clique - nao precisa de mais nada." 'Green'
     }
 }
 
@@ -2053,7 +2051,7 @@ function Coletar-Completa {
     Coletar-Drivers
     Gerar-ResumoGeral
     Gerar-ArquivoJson
-    Gerar-DadosEmbutidos
+    Finalizar-Visualizador
     if (-not $SemZip) { Compactar-Zip }
 }
 
@@ -2136,14 +2134,14 @@ function Loop-Menu {
         }
 
         if ($up -eq 'R') { Gerar-ResumoGeral; Read-Host "Retornando. ENTER" | Out-Null; continue }
-        if ($up -eq 'Z') { Gerar-DadosEmbutidos; Compactar-Zip; Read-Host "Retornando. ENTER" | Out-Null; continue }
+        if ($up -eq 'Z') { Finalizar-Visualizador; Compactar-Zip; Read-Host "Retornando. ENTER" | Out-Null; continue }
         if ($up -eq 'J') { Gerar-ArquivoJson; Read-Host "JSON gravado com sucesso. Retornando. ENTER" | Out-Null; continue }
-        if ($up -eq 'H') { Gerar-DadosEmbutidos; Read-Host "Visualizador atualizado com os dados atuais. Retornando. ENTER" | Out-Null; continue }
+        if ($up -eq 'H') { Finalizar-Visualizador; Read-Host "Visualizador atualizado com os dados atuais. Retornando. ENTER" | Out-Null; continue }
 
         $itens = $entrada -split '[,; ]+' | Where-Object { $_ -ne '' }
         foreach ($it in $itens) { Executar-Tarefa $it }
 
-        if ($itens -notcontains '1') { Gerar-ResumoGeral; Gerar-DadosEmbutidos }
+        if ($itens -notcontains '1') { Gerar-ResumoGeral; Finalizar-Visualizador }
 
         Write-Host ""
         Read-Host "Tolerancia de thread terminada. ENTER para liberar menu." | Out-Null
@@ -2168,7 +2166,7 @@ if ($Tarefas -and $Tarefas.Count -gt 0) {
     if ($Tarefas -notcontains 'Completa' -and $Tarefas -notcontains 'Tudo' -and $Tarefas -notcontains '1') {
         Gerar-ResumoGeral
         Gerar-ArquivoJson
-        Gerar-DadosEmbutidos
+        Finalizar-Visualizador
         if (-not $SemZip) { Compactar-Zip }
     }
 } else {
@@ -2179,4 +2177,19 @@ Write-Host ""
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "  PROCESSO CONCLUIDO. Alocado no espaco: $Destino" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
+
+# Rede de seguranca final: garante que o visualizador.html exista e esteja com os dados mais
+# recentes, independente do caminho de execucao que o script seguiu (menu interativo, -Tarefas,
+# -Auto, ou saida antecipada do usuario).
+$destHtmlFinal = Join-Path $Destino 'visualizador.html'
+try {
+    Finalizar-Visualizador
+} catch {
+    Log "[FALHOU] Regeneracao final do visualizador -> $($_.Exception.Message)" 'Yellow'
+}
+if (Test-Path $destHtmlFinal) {
+    Write-Host "  Visualizador: $destHtmlFinal (abra com duplo-clique)" -ForegroundColor Green
+} else {
+    Write-Host "  [ATENCAO] visualizador.html NAO foi encontrado em $Destino - verifique o log em coleta_diagnostico.log" -ForegroundColor Red
+}
 Write-Host ""
