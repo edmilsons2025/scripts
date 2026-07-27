@@ -191,6 +191,79 @@ function Escrever-Visualizador {
     $script:VisualizadorGravado = $true
 }
 
+function Gerar-DadosEmbutidos {
+    <#
+    .SYNOPSIS
+      Varre os arquivos de texto ja coletados (JSON, CSV, MD, TXT, LOG, XML, HTML) e embute o
+      conteudo de todos eles num unico 'dados.js', que define window.EMBEDDED_DATA. Com isso, o
+      visualizador.html abre com duplo-clique e carrega tudo automaticamente, sem o usuario precisar
+      selecionar a pasta. Arquivos binarios (evtx, dmp) sao referenciados como null (metadados apenas).
+    #>
+    Detectar-Ambiente
+    Log ">> Embutindo dados coletados no visualizador (dados.js)..." 'Cyan'
+    $jsPath = Join-Path $Destino 'dados.js'
+
+    $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg')
+    $extBinRef = @('.evtx', '.dmp')          # referenciados, mas conteudo nao embutido
+    $limiteBytes = 6MB                        # trava por arquivo, evita estourar memoria do navegador
+
+    Executar "Serializacao dos artefatos em dados.js" {
+        $baseLen = $Destino.TrimEnd('\').Length + 1
+        $rootName = Split-Path $Destino -Leaf
+
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("window.EMBEDDED_DATA = {")
+        [void]$sb.AppendLine("  rootName: $($rootName | ConvertTo-Json),")
+        [void]$sb.AppendLine("  files: {")
+
+        $arquivos = Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'dados.js' -and $_.Name -ne 'visualizador.html' }
+
+        $primeiro = $true
+        foreach ($arq in $arquivos) {
+            $rel = ($rootName + '\' + $arq.FullName.Substring($baseLen)) -replace '\\', '/'
+            $ext = $arq.Extension.ToLower()
+            $chaveJson = $rel | ConvertTo-Json
+
+            if (-not $primeiro) { [void]$sb.AppendLine(",") }
+            $primeiro = $false
+
+            if ($extBinRef -contains $ext) {
+                [void]$sb.Append("    $chaveJson`: null")
+            } elseif (($extTexto -contains $ext) -and ($arq.Length -le $limiteBytes)) {
+                try {
+                    $conteudo = [System.IO.File]::ReadAllText($arq.FullName, [System.Text.Encoding]::UTF8)
+                    $valJson = $conteudo | ConvertTo-Json
+                    [void]$sb.Append("    $chaveJson`: $valJson")
+                } catch {
+                    [void]$sb.Append("    $chaveJson`: null")
+                }
+            } else {
+                # arquivo grande ou tipo nao textual -> apenas referencia
+                [void]$sb.Append("    $chaveJson`: null")
+            }
+        }
+
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("  }")
+        [void]$sb.AppendLine("};")
+
+        [System.IO.File]::WriteAllText($jsPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+
+        # Injeta a referencia ao dados.js no HTML (uma unica vez), antes do </head>
+        $destHtml = Join-Path $Destino 'visualizador.html'
+        if (Test-Path $destHtml) {
+            $htmlAtual = [System.IO.File]::ReadAllText($destHtml, [System.Text.Encoding]::UTF8)
+            if ($htmlAtual -notmatch 'src="dados\.js"') {
+                $htmlAtual = $htmlAtual -replace '</head>', '<script src="dados.js"></script></head>'
+                [System.IO.File]::WriteAllText($destHtml, $htmlAtual, (New-Object System.Text.UTF8Encoding($false)))
+            }
+        }
+        $tam = [math]::Round((Get-Item $jsPath).Length / 1MB, 2)
+        Log "dados.js gerado ($tam MB). Abra visualizador.html com duplo-clique." 'Green'
+    }
+}
+
 $htmlContent = @'
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -236,6 +309,7 @@ $htmlContent = @'
   a{color:inherit}
   ::selection{background:hsl(var(--foreground)/.15)}
   code, .mono{font-family:var(--mono)}
+  svg{width:1em; height:1em; flex-shrink:0}
   ::-webkit-scrollbar{width:10px; height:10px}
   ::-webkit-scrollbar-thumb{background:hsl(var(--border)); border-radius:8px}
   ::-webkit-scrollbar-track{background:transparent}
@@ -254,7 +328,7 @@ $htmlContent = @'
     width:26px; height:26px; border-radius:7px; background:hsl(var(--primary));
     display:flex; align-items:center; justify-content:center; flex-shrink:0;
   }
-  #sidebar .brand .logo svg{width:14px; height:14px; stroke:hsl(var(--primary-foreground))}
+  #sidebar .brand .logo svg{width:14px !important; height:14px !important; stroke:hsl(var(--primary-foreground))}
   #sidebar .brand .txt{line-height:1.2}
   #sidebar .brand .txt b{font-size:13px; font-weight:600; display:block}
   #sidebar .brand .txt span{font-size:11px; color:hsl(var(--muted-foreground))}
@@ -312,6 +386,7 @@ $htmlContent = @'
 
   .page-head{margin-bottom:6px}
   .page-head h1{font-size:20px; font-weight:600; margin:0 0 4px; display:flex; align-items:center; gap:10px}
+  .page-head h1 svg{width:22px; height:22px}
   .page-desc{
     color:hsl(var(--muted-foreground)); font-size:13px; max-width:760px; margin:0 0 22px; line-height:1.6;
     padding:12px 14px; background:hsl(var(--muted)/.5); border:1px solid hsl(var(--border)); border-radius:var(--radius);
@@ -388,11 +463,15 @@ $htmlContent = @'
     display:flex; gap:12px; align-items:flex-start; padding:16px; border:1px dashed hsl(var(--border));
     border-radius:var(--radius); color:hsl(var(--muted-foreground)); font-size:12.5px;
   }
+  .binary-note svg{width:20px; height:20px; opacity:.6}
+  #dropzone svg, .landing .logo-big svg{margin-bottom:0}
+  .navitem .ic{width:15px; height:15px}
+  .fitem svg{width:15px; height:15px}
 
   .empty-state{
     text-align:center; padding:60px 20px; color:hsl(var(--muted-foreground));
   }
-  .empty-state svg{width:34px; height:34px; opacity:.4; margin-bottom:10px}
+  .empty-state svg{width:34px !important; height:34px !important; opacity:.4; margin-bottom:10px}
   .empty-state h3{font-size:14px; color:hsl(var(--foreground)); margin:0 0 4px}
   .empty-state p{font-size:12.5px; margin:0; max-width:340px; margin:0 auto}
 
@@ -414,7 +493,7 @@ $htmlContent = @'
     width:52px; height:52px; border-radius:14px; background:hsl(var(--primary)); margin:0 auto 20px;
     display:flex; align-items:center; justify-content:center;
   }
-  .landing .logo-big svg{width:26px; height:26px; stroke:hsl(var(--primary-foreground))}
+  .landing .logo-big svg{width:26px !important; height:26px !important; stroke:hsl(var(--primary-foreground))}
   .landing h1{font-size:20px; margin:0 0 8px; font-weight:600}
   .landing p{color:hsl(var(--muted-foreground)); font-size:13.5px; margin:0 0 26px; line-height:1.6}
   #dropzone{
@@ -422,7 +501,7 @@ $htmlContent = @'
     transition:.15s; cursor:pointer;
   }
   #dropzone.drag{border-color:hsl(var(--ring)); background:hsl(var(--accent)/.4)}
-  #dropzone svg{width:26px; height:26px; opacity:.5; margin-bottom:10px}
+  #dropzone svg{width:26px !important; height:26px !important; opacity:.5; margin-bottom:10px}
   .landing .fallback{margin-top:14px; font-size:12px; color:hsl(var(--muted-foreground))}
   .landing .fallback label{color:hsl(var(--foreground)); text-decoration:underline; cursor:pointer; text-underline-offset:2px}
 
@@ -450,6 +529,7 @@ $htmlContent = @'
     <div id="topbar">
       <div class="crumbs" id="crumbs">Nenhuma coleta carregada</div>
       <div class="actions">
+        <button class="btn" id="mdBtn" style="display:none" title="Exportar visão atual em Markdown">Exportar .md</button>
         <button class="btn icon" id="themeBtn" title="Alternar tema"></button>
         <button class="btn" id="reloadBtn" style="display:none">Carregar outra coleta</button>
       </div>
@@ -482,9 +562,17 @@ const ICONS = {
 function icon(name, extra){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="'+(extra||'')+'">'+ICONS[name]+'</svg>'; }
 
 /* ============================================================
+   MODO EMBUTIDO
+   Se um arquivo dados.js (gerado pelo script de coleta) estiver ao lado
+   deste HTML, ele define window.EMBEDDED_DATA = { rootName, files: {rel: conteudo} }.
+   Nesse caso o visualizador carrega tudo automaticamente, sem pedir a pasta.
+============================================================ */
+let EMBEDDED = null;   // { rootName, files: {relPath: string} }
+
+/* ============================================================
    ESTADO
 ============================================================ */
-let FILES = {};        // relPath -> File object
+let FILES = {};        // relPath -> File object (modo seleção de pasta)
 let TREE = {};         // topFolder -> [ {rel,name,ext,size,file} ]
 let ROOTNAME = '';
 let ACTIVE = null;
@@ -632,16 +720,30 @@ function dataTable(rows, columns){
 }
 
 /* ============================================================
-   LEITURA DE ARQUIVOS (JSON/CSV) A PARTIR DO TREE
+   LEITURA DE ARQUIVOS (JSON/CSV) — funciona em modo File ou embutido
 ============================================================ */
-async function readText(file){ return await file.text(); }
+function allKeys(){
+  return EMBEDDED ? Object.keys(EMBEDDED.files) : Object.keys(FILES);
+}
+async function readByKey(key){
+  if (EMBEDDED) return EMBEDDED.files[key];
+  return await FILES[key].text();
+}
+function sizeByKey(key){
+  if (EMBEDDED){ const v = EMBEDDED.files[key]; return v ? v.length : 0; }
+  return FILES[key].size;
+}
+async function readText(target){
+  // target pode ser um File (modo pasta) ou uma string-chave (não usado direto aqui)
+  if (typeof target === 'string') return await readByKey(target);
+  return await target.text();
+}
 async function getJSON(relSuffix){
-  // relSuffix ex: '09_Dados_Brutos/computer_system.json'
   const f = findFile(relSuffix);
   if (!f) return null;
   if (JSONCACHE[relSuffix]) return JSONCACHE[relSuffix];
   try {
-    const txt = await readText(f.file);
+    const txt = await readByKey(f.rel);
     const parsed = JSON.parse(txt);
     JSONCACHE[relSuffix] = parsed;
     return parsed;
@@ -650,31 +752,27 @@ async function getJSON(relSuffix){
 async function getCSV(relSuffix){
   const f = findFile(relSuffix);
   if (!f) return null;
-  try {
-    const txt = await readText(f.file);
-    return parseCSV(txt).rows;
-  } catch(e){ return null; }
+  try { return parseCSV(await readByKey(f.rel)).rows; } catch(e){ return null; }
 }
 async function getTextFile(relSuffix){
   const f = findFile(relSuffix);
   if (!f) return null;
-  try { return await readText(f.file); } catch(e){ return null; }
+  try { return await readByKey(f.rel); } catch(e){ return null; }
 }
 function findFile(suffix){
   const norm = suffix.replace(/\\/g,'/').toLowerCase();
-  for (const key in FILES){
-    if (key.replace(/\\/g,'/').toLowerCase().endsWith(norm)) return {rel:key, file:FILES[key]};
+  for (const key of allKeys()){
+    if (key.replace(/\\/g,'/').toLowerCase().endsWith(norm)) return {rel:key};
   }
   return null;
 }
 function filesInFolder(folderName){
   const out = [];
-  for (const key in FILES){
-    const norm = key.replace(/\\/g,'/');
-    const parts = norm.split('/');
+  for (const key of allKeys()){
+    const parts = key.replace(/\\/g,'/').split('/');
     const idx = parts.indexOf(folderName);
     if (idx !== -1){
-      out.push({rel:key, name:parts[parts.length-1], file:FILES[key], size:FILES[key].size, sub:parts.slice(idx+1).join('/')});
+      out.push({rel:key, name:parts[parts.length-1], size:sizeByKey(key), sub:parts.slice(idx+1).join('/')});
     }
   }
   return out.sort((a,b)=>a.rel.localeCompare(b.rel));
@@ -698,6 +796,7 @@ function ingestFileList(fileList){
   buildNav();
   navigate(SECTIONS[0].id);
   document.getElementById('reloadBtn').style.display='inline-flex';
+  document.getElementById('mdBtn').style.display='inline-flex';
 }
 
 function buildTree(){
@@ -1006,8 +1105,8 @@ function initFileBrowser(folder, files, listId){
       await showFile(f, listId);
     });
   });
-  // auto-open first text-ish file
-  const firstText = files.find(f=>TEXT_EXT.includes('.'+f.name.split('.').pop().toLowerCase()));
+  // auto-open first text-ish file (que não seja binário embutido nulo)
+  const firstText = files.find(f=>TEXT_EXT.includes('.'+f.name.split('.').pop().toLowerCase()) && !(EMBEDDED && EMBEDDED.files[f.rel]===null));
   if (firstText){
     const idx = files.indexOf(firstText);
     listEl.querySelector('[data-i="'+idx+'"]').click();
@@ -1017,15 +1116,16 @@ function initFileBrowser(folder, files, listId){
 async function showFile(f, listId){
   const view = document.getElementById(listId+'_view');
   const ext = '.'+f.name.split('.').pop().toLowerCase();
-  if (BINARY_EXT.includes(ext)){
+  const isBinary = BINARY_EXT.includes(ext) || (EMBEDDED && EMBEDDED.files[f.rel] === null);
+  if (isBinary){
     view.innerHTML = '<div class="binary-note">'+icon('raw')+'<div><b>'+esc(f.name)+'</b> ('+fmtBytes(f.size)+')<br>'
-      + (ext==='.evtx' ? 'Arquivo de log de eventos binário. Abra com o Visualizador de Eventos do Windows (eventvwr.msc → Ação → Abrir Log Salvo) ou <code>Get-WinEvent -Path</code> no PowerShell.'
-        : 'Arquivo de despejo de memória binário. Analise com WinDbg ou <code>!analyze -v</code> para identificar a causa do travamento.')
+      + (ext==='.evtx' ? 'Arquivo de log de eventos binário. Abra com o Visualizador de Eventos do Windows (eventvwr.msc → Ação → Abrir Log Salvo) ou <code>Get-WinEvent -Path</code> no PowerShell. No modo embutido, o conteúdo binário não é incluído — abra o arquivo original na pasta da coleta.'
+        : 'Arquivo de despejo de memória binário. Analise com WinDbg ou <code>!analyze -v</code> para identificar a causa do travamento. O conteúdo binário não é embutido no visualizador — use o arquivo original.')
       + '</div></div>';
     return;
   }
   view.innerHTML = '<div class="empty-state"><p>Carregando…</p></div>';
-  const txt = await readText(f.file);
+  const txt = await readByKey(f.rel);
   if (ext==='.json'){
     try {
       const parsed = JSON.parse(txt);
@@ -1100,13 +1200,86 @@ dirInput.addEventListener('change', e=>{ if (e.target.files.length) ingestFileLi
 document.body.appendChild(dirInput);
 
 document.getElementById('reloadBtn').addEventListener('click', ()=>{
-  FILES={}; TREE={}; JSONCACHE={}; ACTIVE=null;
+  FILES={}; TREE={}; JSONCACHE={}; ACTIVE=null; EMBEDDED=null;
   document.getElementById('navwrap').innerHTML='';
   document.getElementById('reloadBtn').style.display='none';
+  document.getElementById('mdBtn').style.display='none';
   showLanding();
 });
 
-showLanding();
+/* ============================================================
+   EXPORTAÇÃO EM MARKDOWN
+============================================================ */
+function tableToMD(rows, columns){
+  if (!rows || !rows.length) return '_Sem dados._\n';
+  const strip = h => String(h).replace(/<[^>]+>/g,'').replace(/\|/g,'\\|').replace(/\n/g,' ').trim();
+  let md = '| '+columns.map(c=>strip(c[0])).join(' | ')+' |\n';
+  md += '| '+columns.map(()=>'---').join(' | ')+' |\n';
+  rows.forEach(r=>{
+    md += '| '+columns.map(c=>{
+      let v = c[2] ? c[2](r[c[1]], r) : r[c[1]];
+      return strip(v===undefined||v===null?'—':v);
+    }).join(' | ')+' |\n';
+  });
+  return md+'\n';
+}
+
+async function exportMarkdown(){
+  const meta = (await getJSON('00_Resumo/coleta_consolidada.json')||{}).Metadados || {};
+  const rootName = EMBEDDED ? EMBEDDED.rootName : ROOTNAME;
+  let md = '# Diagnóstico — '+rootName+'\n\n';
+  md += '- **Ambiente:** '+(meta.Ambiente||'—')+'\n';
+  md += '- **Data da coleta:** '+(meta.DataColeta||'—')+'\n';
+  md += '- **Unidade do Windows:** '+(meta.UnidadeWindows||'—')+'\n';
+  md += '- **Módulos coletados:** '+((meta.ColetasRealizadas||[]).join(', ')||'—')+'\n\n';
+
+  // Anexa todos os RESUMO_*.md que existirem
+  const mdFiles = allKeys().filter(k=>/RESUMO_.*\.md$/i.test(k) || /RESUMO_GERAL\.md$/i.test(k));
+  for (const k of mdFiles){
+    const txt = await readByKey(k);
+    if (txt){ md += '\n---\n\n'+txt.trim()+'\n'; }
+  }
+
+  // Tabelas principais de hardware/serviços/bateria a partir dos CSV
+  const blocks = [
+    ['## Serviços do Windows', await getCSV('05_Registro/servicos.csv'), [['Nome','Name'],['Estado','State'],['Início','StartMode'],['Caminho','PathName']]],
+    ['## Memória RAM', await getCSV('09_Dados_Brutos/memoria.csv'), [['Local','DeviceLocator'],['Capacidade',null,r=>fmtBytesRaw(r.Capacity)],['Velocidade','Speed'],['Fabricante','Manufacturer']]],
+    ['## Discos', await getCSV('09_Dados_Brutos/discos.csv'), [['Modelo','Model'],['Tamanho',null,r=>fmtBytesRaw(r.Size)],['Interface','InterfaceType'],['Status','Status']]],
+    ['## Dispositivos com erro', await getCSV('09_Dados_Brutos/dispositivos_com_erro.csv'), [['Nome','Name'],['Código','ConfigManagerErrorCode'],['Device ID','DeviceID']]],
+    ['## Histórico de bateria', await getCSV('07_Bateria_BMS/historico_capacidade.csv'), [['Período','Periodo'],['Cheia','CapacidadeCheia'],['Projeto','CapacidadeProjeto']]],
+    ['## Eventos críticos', await getCSV('04_Boot/eventos_criticos_desligamento.csv'), [['Data','TimeCreated'],['ID','Id'],['Nível','LevelDisplayName'],['Provedor','ProviderName']]],
+  ];
+  for (const [title, rows, cols] of blocks){
+    if (rows && rows.length){ md += '\n---\n\n'+title+'\n\n'+tableToMD(rows, cols); }
+  }
+
+  const blob = new Blob([md], {type:'text/markdown;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'diagnostico_'+rootName+'.md';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+document.getElementById('mdBtn').addEventListener('click', exportMarkdown);
+
+/* ============================================================
+   BOOT: modo embutido (dados.js) ou seleção manual de pasta
+============================================================ */
+function startEmbedded(){
+  EMBEDDED = window.EMBEDDED_DATA;
+  ROOTNAME = EMBEDDED.rootName || 'coleta';
+  buildNav();
+  const first = SECTIONS.find(s=>filesInFolder(s.folder).length>0) || SECTIONS[0];
+  navigate(first.id);
+  document.getElementById('reloadBtn').style.display='none'; // sem "carregar outra" em modo embutido
+  document.getElementById('mdBtn').style.display='inline-flex';
+}
+
+if (window.EMBEDDED_DATA && window.EMBEDDED_DATA.files && Object.keys(window.EMBEDDED_DATA.files).length){
+  startEmbedded();
+} else {
+  showLanding();
+}
 </script>
 </body>
 </html>
@@ -1875,6 +2048,7 @@ function Coletar-Completa {
     Coletar-Drivers
     Gerar-ResumoGeral
     Gerar-ArquivoJson
+    Gerar-DadosEmbutidos
     if (-not $SemZip) { Compactar-Zip }
 }
 
@@ -1923,6 +2097,7 @@ function Mostrar-Menu {
     Write-Host "   [8] Módulo: Bateria, Degradação e Subsistema BMS"
     Write-Host "   [9] Módulo: Árvores de Repositórios de Drivers"
     Write-Host "   ----------------------------------------------------------"
+    Write-Host "   [H] Atualizar visualizador HTML (embutir dados coletados)"
     Write-Host "   [J] Exportar JSON Mestre e consolidar dados na memória"
     Write-Host "   [D] Alterar destino de alocação de saída"
     Write-Host "   [R] Renderizar novo relatório analítico Markdown (Resumo)"
@@ -1956,13 +2131,14 @@ function Loop-Menu {
         }
 
         if ($up -eq 'R') { Gerar-ResumoGeral; Read-Host "Retornando. ENTER" | Out-Null; continue }
-        if ($up -eq 'Z') { Compactar-Zip;     Read-Host "Retornando. ENTER" | Out-Null; continue }
+        if ($up -eq 'Z') { Gerar-DadosEmbutidos; Compactar-Zip; Read-Host "Retornando. ENTER" | Out-Null; continue }
         if ($up -eq 'J') { Gerar-ArquivoJson; Read-Host "JSON gravado com sucesso. Retornando. ENTER" | Out-Null; continue }
+        if ($up -eq 'H') { Gerar-DadosEmbutidos; Read-Host "Visualizador atualizado com os dados atuais. Retornando. ENTER" | Out-Null; continue }
 
         $itens = $entrada -split '[,; ]+' | Where-Object { $_ -ne '' }
         foreach ($it in $itens) { Executar-Tarefa $it }
 
-        if ($itens -notcontains '1') { Gerar-ResumoGeral }
+        if ($itens -notcontains '1') { Gerar-ResumoGeral; Gerar-DadosEmbutidos }
 
         Write-Host ""
         Read-Host "Tolerancia de thread terminada. ENTER para liberar menu." | Out-Null
@@ -1987,6 +2163,7 @@ if ($Tarefas -and $Tarefas.Count -gt 0) {
     if ($Tarefas -notcontains 'Completa' -and $Tarefas -notcontains 'Tudo' -and $Tarefas -notcontains '1') {
         Gerar-ResumoGeral
         Gerar-ArquivoJson
+        Gerar-DadosEmbutidos
         if (-not $SemZip) { Compactar-Zip }
     }
 } else {
