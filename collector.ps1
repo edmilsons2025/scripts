@@ -1231,6 +1231,12 @@ function Finalizar-Visualizador {
     Log ">> Gerando visualizador.html autocontido (dados embutidos)..." 'Cyan'
     $destHtml = Join-Path $Destino 'visualizador.html'
 
+    # Garante que o JSON mestre e o resumo Markdown estejam SEMPRE atualizados antes de embutir,
+    # independente de quais opcoes de menu o usuario rodou ou em que ordem. Isso evita que o
+    # visualizador.html fique com um snapshot antigo (ex: gerado antes do usuario apertar [J]).
+    Gerar-ArquivoJson
+    Gerar-ResumoGeral
+
     $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg')
     $extBinRef = @('.evtx', '.dmp')
     $limiteBytes = 6MB
