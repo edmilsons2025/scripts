@@ -378,7 +378,6 @@ $script:htmlContent = @'
       <div class="txt"><b>Diagnóstico</b><span>Visualizador de coleta</span></div>
     </div>
     <div id="navwrap"></div>
-    <div id="sidebar-foot">Dados processados localmente no navegador. Nada é enviado pela rede.</div>
   </aside>
 
   <div id="main">
@@ -2656,6 +2655,14 @@ try {
 }
 if (Test-Path $destHtmlFinal) {
     Write-Host "  Visualizador: $destHtmlFinal (abra com duplo-clique)" -ForegroundColor Green
+    Executar "Abertura automatica do visualizador no navegador padrao" {
+        # O script roda elevado (auto-UAC no topo) e o Windows bloqueia processos elevados
+        # de invocar apps empacotados (ex.: Edge) via ShellExecute direto - a chamada falha
+        # em silencio. Repassar via explorer.exe (que ja roda sem elevacao) contorna isso:
+        # o explorer encaminha o pedido para a instancia do shell do usuario, que abre o
+        # arquivo com o handler padrao normalmente.
+        Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$destHtmlFinal`"" -ErrorAction Stop
+    } -Silencioso | Out-Null
 } else {
     Write-Host "  [ATENCAO] visualizador.html NAO foi encontrado em $Destino - verifique o log em coleta_diagnostico.log" -ForegroundColor Red
 }
