@@ -42,6 +42,54 @@ param(
 $ErrorActionPreference = 'Continue'
 $DestinoFoiInformado = $PSBoundParameters.ContainsKey('Destino')
 
+# ============================================================
+#  VERIFICACAO DE PRIVILEGIOS ADMINISTRATIVOS
+#  Sem elevacao, hives de registro em uso, alguns Event Logs de
+#  seguranca, dumps protegidos e diretorios restritos do sistema
+#  podem falhar durante a coleta. Tenta reexecutar elevado via
+#  UAC; se recusado/indisponivel, prossegue com aviso explicito.
+# ============================================================
+$script:IsAdmin = $false
+try {
+    $identidadeAtual = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principalAtual = New-Object Security.Principal.WindowsPrincipal($identidadeAtual)
+    $script:IsAdmin = $principalAtual.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch {}
+
+if (-not $script:IsAdmin -and $env:SystemDrive -ne 'X:') {
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Privilegios administrativos nao detectados. Solicitando elevacao (UAC)..." -ForegroundColor Yellow
+    $scriptPathAtual = $MyInvocation.MyCommand.Path
+    $elevado = $false
+    if ($scriptPathAtual) {
+        try {
+            $argsElevacao = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPathAtual`"")
+            if ($DestinoFoiInformado)                { $argsElevacao += @('-Destino', "`"$Destino`"") }
+            if ($Tarefas -and $Tarefas.Count -gt 0)  { $argsElevacao += @('-Tarefas', ($Tarefas -join ',')) }
+            if ($Auto)                                { $argsElevacao += '-Auto' }
+            if ($SemZip)                               { $argsElevacao += '-SemZip' }
+            Start-Process -FilePath 'powershell.exe' -ArgumentList $argsElevacao -Verb RunAs -ErrorAction Stop
+            $elevado = $true
+        } catch {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [AVISO] Elevacao recusada ou indisponivel: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [AVISO] Nao foi possivel determinar o caminho do script para reexecutar elevado." -ForegroundColor Yellow
+    }
+
+    if ($elevado) {
+        exit
+    } else {
+        Write-Host "================================================================" -ForegroundColor Yellow
+        Write-Host "  ATENCAO: executando SEM privilegios administrativos." -ForegroundColor Yellow
+        Write-Host "  A coleta pode ficar INCOMPLETA (hives de registro em uso," -ForegroundColor Yellow
+        Write-Host "  alguns Event Logs de seguranca, dumps protegidos e" -ForegroundColor Yellow
+        Write-Host "  diretorios restritos do sistema podem falhar ou ser" -ForegroundColor Yellow
+        Write-Host "  ignorados)." -ForegroundColor Yellow
+        Write-Host "================================================================" -ForegroundColor Yellow
+        Write-Host ""
+    }
+}
+
 $ScriptRoot = $null
 $ScriptPath = $MyInvocation.MyCommand.Path
 if ($ScriptPath) { $ScriptRoot = Split-Path -Parent $ScriptPath }
@@ -216,13 +264,26 @@ $script:htmlContent = @'
   .badge.bad{background:hsl(var(--destructive)/.13); color:hsl(var(--destructive))}
   .badge.dim{background:hsl(var(--muted)); color:hsl(var(--muted-foreground))}
 
-  .tablewrap{border:1px solid hsl(var(--border)); border-radius:var(--radius); overflow:auto; max-height:520px; margin-bottom:16px}
+  .tablewrap-outer{margin-bottom:16px}
+  .tablebar{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .tablefilter{
+    flex:1; max-width:280px; font-family:var(--sans); font-size:12.5px; padding:6px 10px;
+    border-radius:calc(var(--radius) - 2px); border:1px solid hsl(var(--border));
+    background:hsl(var(--background)); color:hsl(var(--foreground));
+  }
+  .tablefilter:focus{outline:none; border-color:hsl(var(--ring))}
+  .tablecount{font-size:11px; color:hsl(var(--muted-foreground))}
+  .tablewrap{border:1px solid hsl(var(--border)); border-radius:var(--radius); overflow:auto; max-height:520px}
   table.data{width:100%; border-collapse:collapse; font-size:12.5px}
   table.data thead th{
     position:sticky; top:0; background:hsl(var(--muted)); text-align:left; padding:8px 12px;
     font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:hsl(var(--muted-foreground));
     border-bottom:1px solid hsl(var(--border)); white-space:nowrap;
   }
+  table.data thead th.sortable{cursor:pointer; user-select:none}
+  table.data thead th.sortable:hover{color:hsl(var(--foreground))}
+  table.data thead th.sorted{color:hsl(var(--foreground))}
+  table.data thead th .sort-ic{font-size:9px}
   table.data tbody td{padding:7px 12px; border-bottom:1px solid hsl(var(--border)/.6); white-space:nowrap; max-width:340px; overflow:hidden; text-overflow:ellipsis}
   table.data tbody tr:hover{background:hsl(var(--accent)/.5)}
   table.data tbody td.wrap{white-space:normal}
@@ -251,6 +312,14 @@ $script:htmlContent = @'
     border-radius:var(--radius); color:hsl(var(--muted-foreground)); font-size:12.5px;
   }
   .binary-note svg{width:20px; height:20px; opacity:.6}
+  .rawtoggle{margin-top:14px}
+  .rawtoggle summary{cursor:pointer; font-size:12px; color:hsl(var(--muted-foreground)); user-select:none}
+  .rawtoggle summary:hover{color:hsl(var(--foreground))}
+  .rawtoggle pre{
+    background:hsl(var(--muted)/.5); border:1px solid hsl(var(--border)); border-radius:var(--radius);
+    padding:14px 16px; font-size:12px; font-family:var(--mono); overflow:auto; max-height:400px;
+    white-space:pre-wrap; word-break:break-word; margin:8px 0 0;
+  }
   #dropzone svg, .landing .logo-big svg{margin-bottom:0}
   .navitem .ic{width:15px; height:15px}
   .fitem svg{width:15px; height:15px}
@@ -316,7 +385,6 @@ $script:htmlContent = @'
     <div id="topbar">
       <div class="crumbs" id="crumbs">Nenhuma coleta carregada</div>
       <div class="actions">
-        <button class="btn" id="mdBtn" style="display:none" title="Exportar visão atual em Markdown">Exportar .md</button>
         <button class="btn icon" id="themeBtn" title="Alternar tema"></button>
         <button class="btn" id="reloadBtn" style="display:none">Carregar outra coleta</button>
       </div>
@@ -493,17 +561,77 @@ function kvCard(title, obj, fieldsMap){
   return '<div class="card"><h3>'+esc(title)+'</h3><table class="kv">'+rows.join('')+'</table></div>';
 }
 
+/* ============================================================
+   TABELA GENERICA ORDENAVEL/FILTRAVEL
+   dataTable(rows, columns) mantem a mesma assinatura de sempre (retorna uma
+   string HTML sincronamente), mas agora tambem monta um filtro de texto e
+   cabecalhos clicaveis para ordenar - usando o mesmo truque de setTimeout(fn,0)
+   ja usado em fileBrowser/initFileBrowser: o HTML retornado ja foi inserido no
+   DOM pelo chamador antes desse callback rodar.
+============================================================ */
+let TABLE_SEQ = 0;
+function tableCellRaw(col, row){
+  return col[2] ? col[2](row[col[1]], row) : row[col[1]];
+}
 function dataTable(rows, columns){
   if (!rows || !rows.length) return '<div class="empty-state" style="padding:30px"><p>Nenhum dado disponível para esta tabela.</p></div>';
-  const head = columns.map(c=>'<th>'+esc(c[0])+'</th>').join('');
-  const body = rows.map(r=>{
+  const id = 'tbl'+(TABLE_SEQ++);
+  setTimeout(()=>wireDataTable(id, rows, columns), 0);
+  return '<div class="tablewrap-outer" id="'+id+'_outer">'
+    + '<div class="tablebar"><input type="text" class="tablefilter" id="'+id+'_filter" placeholder="Filtrar linhas…"><span class="tablecount" id="'+id+'_count"></span></div>'
+    + '<div class="tablewrap" id="'+id+'_wrap"></div>'
+    + '</div>';
+}
+function renderTableRows(id, rows, columns){
+  const wrap = document.getElementById(id+'_wrap');
+  if (!wrap) return;
+  const head = columns.map((c,i)=>'<th class="sortable" data-i="'+i+'">'+esc(c[0])+'<span class="sort-ic"></span></th>').join('');
+  const body = rows.length ? rows.map(r=>{
     const cells = columns.map(c=>{
       const raw = c[2] ? c[2](r[c[1]], r) : fmtVal(r[c[1]]);
       return '<td class="'+(c[3]||'')+'">'+raw+'</td>';
     }).join('');
     return '<tr>'+cells+'</tr>';
-  }).join('');
-  return '<div class="tablewrap"><table class="data"><thead><tr>'+head+'</tr></thead><tbody>'+body+'</tbody></table></div>';
+  }).join('') : '<tr><td colspan="'+columns.length+'" style="text-align:center;color:hsl(var(--muted-foreground))">Nenhuma linha corresponde ao filtro.</td></tr>';
+  wrap.innerHTML = '<table class="data"><thead><tr>'+head+'</tr></thead><tbody>'+body+'</tbody></table>';
+}
+function wireDataTable(id, allRows, columns){
+  const outer = document.getElementById(id+'_outer');
+  if (!outer) return; // usuario navegou para outra secao antes do setTimeout disparar
+  const filterEl = document.getElementById(id+'_filter');
+  const countEl = document.getElementById(id+'_count');
+  let sortCol = -1, sortDir = 1;
+
+  function wireHeaders(){
+    outer.querySelectorAll('th.sortable').forEach(th=>{
+      const i = +th.dataset.i;
+      th.classList.toggle('sorted', i===sortCol);
+      th.querySelector('.sort-ic').textContent = i===sortCol ? (sortDir>0?' ▲':' ▼') : '';
+      th.onclick = ()=>{
+        if (sortCol===i) sortDir=-sortDir; else { sortCol=i; sortDir=1; }
+        applyFilterSort();
+      };
+    });
+  }
+  function applyFilterSort(){
+    const q = filterEl.value.trim().toLowerCase();
+    let rows = !q ? allRows : allRows.filter(r=>columns.some(c=>{
+      const raw = tableCellRaw(c, r);
+      return String(raw===null||raw===undefined?'':raw).toLowerCase().includes(q);
+    }));
+    if (sortCol >= 0){
+      const c = columns[sortCol];
+      rows = rows.slice().sort((a,b)=>{
+        const va = tableCellRaw(c, a), vb = tableCellRaw(c, b);
+        return String(va===null||va===undefined?'':va).localeCompare(String(vb===null||vb===undefined?'':vb), undefined, {numeric:true}) * sortDir;
+      });
+    }
+    countEl.textContent = rows.length !== allRows.length ? (rows.length+' de '+allRows.length) : (allRows.length+' linha(s)');
+    renderTableRows(id, rows, columns);
+    wireHeaders();
+  }
+  filterEl.addEventListener('input', applyFilterSort);
+  applyFilterSort();
 }
 
 /* ============================================================
@@ -517,7 +645,7 @@ async function readByKey(key){
   return await FILES[key].text();
 }
 function sizeByKey(key){
-  if (EMBEDDED){ const v = EMBEDDED.files[key]; return v ? v.length : 0; }
+  if (EMBEDDED){ return (EMBEDDED.sizes && EMBEDDED.sizes[key]) || 0; }
   return FILES[key].size;
 }
 async function readText(target){
@@ -583,7 +711,6 @@ function ingestFileList(fileList){
   buildNav();
   navigate(SECTIONS[0].id);
   document.getElementById('reloadBtn').style.display='inline-flex';
-  document.getElementById('mdBtn').style.display='inline-flex';
 }
 
 function buildTree(){
@@ -862,8 +989,232 @@ function statCard(val, label, cls){
 }
 
 /* --- Navegador de arquivos genérico (usado para pastas com binários/texto misturado) --- */
-const TEXT_EXT = ['.txt','.log','.md','.xml','.html','.htm','.csv','.json','.ini','.reg'];
+const TEXT_EXT = ['.txt','.log','.md','.xml','.html','.htm','.csv','.json','.ini','.reg','.wer'];
 const BINARY_EXT = ['.evtx','.dmp'];
+
+/* ============================================================
+   INTERPRETADOR DE RELATORIOS WER E CABECALHOS DE DUMP (.dmp)
+   WER (Report.wer) e texto simples - interpretado em qualquer modo.
+   Dumps sao binarios: o cabecalho e streams pontuais sao lidos via
+   slices do arquivo (nunca carrega o dump inteiro na memoria), mas
+   isso exige o objeto File real - so funciona no modo "selecionar
+   pasta", ja que no HTML autocontido os .dmp nao sao embutidos.
+============================================================ */
+const NTSTATUS_MAP = {
+  '0xC0000005':'STATUS_ACCESS_VIOLATION — acesso a memória inválida',
+  '0xC0000006':'STATUS_IN_PAGE_ERROR — falha ao paginar memória (indício de RAM ou disco com defeito)',
+  '0xC0000094':'STATUS_INTEGER_DIVIDE_BY_ZERO — divisão por zero',
+  '0xC00000FD':'STATUS_STACK_OVERFLOW — estouro de pilha (recursão infinita)',
+  '0xC0000374':'STATUS_HEAP_CORRUPTION — corrupção de heap detectada',
+  '0xC0000409':'STATUS_STACK_BUFFER_OVERRUN — estouro de buffer (proteção /GS)',
+  '0xC000021A':'STATUS_SYSTEM_PROCESS_TERMINATED — processo crítico do sistema encerrado',
+  '0xC0000135':'STATUS_DLL_NOT_FOUND — DLL dependente não encontrada',
+  '0xC0000142':'STATUS_DLL_INIT_FAILED — falha na inicialização de uma DLL',
+  '0x80000003':'STATUS_BREAKPOINT — ponto de interrupção (assert/depuração)',
+  '0xE06D7363':'Exceção C++ não tratada (Microsoft C++ Exception)',
+};
+const BUGCHECK_MAP = {
+  '0x0000000A':'IRQL_NOT_LESS_OR_EQUAL — driver acessou memória em nível de interrupção inválido',
+  '0x0000001A':'MEMORY_MANAGEMENT — geralmente RAM com defeito ou driver corrompendo memória',
+  '0x0000001E':'KMODE_EXCEPTION_NOT_HANDLED — exceção não tratada em modo kernel',
+  '0x00000050':'PAGE_FAULT_IN_NONPAGED_AREA — acesso a memória inválida (driver ou RAM defeituosa)',
+  '0x0000007A':'KERNEL_DATA_INPAGE_ERROR — falha ao ler dados do disco (indício de disco com defeito)',
+  '0x0000007E':'SYSTEM_THREAD_EXCEPTION_NOT_HANDLED — geralmente causado por um driver com falha',
+  '0x0000009F':'DRIVER_POWER_STATE_FAILURE — um driver não respondeu a uma transição de energia',
+  '0x000000D1':'DRIVER_IRQL_NOT_LESS_OR_EQUAL — driver acessou memória paginada em IRQL alto',
+  '0x000000EF':'CRITICAL_PROCESS_DIED — um processo crítico do Windows foi encerrado',
+  '0x00000124':'WHEA_UNCORRECTABLE_ERROR — erro de hardware não corrigível (CPU/RAM/barramento)',
+  '0x00000133':'DPC_WATCHDOG_VIOLATION — uma rotina do sistema ou driver travou por tempo demais',
+  '0x0000003B':'SYSTEM_SERVICE_EXCEPTION — exceção em uma chamada de sistema (driver/kernel)',
+};
+function fmtCode(n){ return '0x'+(n>>>0).toString(16).toUpperCase().padStart(8,'0'); }
+function fmtHex64(big){ return '0x'+big.toString(16).toUpperCase().padStart(16,'0'); }
+
+/* Rotulos por posicao (P1, P2, ...) para tipos de bucket do WER cujo Sig[N].Name
+   gravado no arquivo e generico ("Problem Signature 0N"), nao um rotulo legivel
+   em ingles. O indice do Sig[] e estavel entre os tipos - so o SIGNIFICADO de
+   cada posicao muda conforme o EventType. */
+const WER_BUCKET_SCHEMAS = {
+  'clr20r3': ['Aplicativo','Versão do aplicativo','Timestamp do aplicativo','Assembly com falha','Versão do assembly','Timestamp do assembly','Método (MethodDef)','Offset IL','Tipo da exceção','Hash da pilha'],
+  'bex': ['Aplicativo','Versão do aplicativo','Timestamp do aplicativo','Módulo com falha','Versão do módulo','Timestamp do módulo','Offset da exceção'],
+  'bex64': ['Aplicativo','Versão do aplicativo','Timestamp do aplicativo','Módulo com falha','Versão do módulo','Timestamp do módulo','Offset da exceção'],
+  'apphangb1': ['Aplicativo','Versão do aplicativo','Assinatura do travamento (hang signature)'],
+  'apphangb1rca': ['Aplicativo','Versão do aplicativo','Assinatura do travamento (hang signature)'],
+  'apphangxproc': ['Aplicativo travado','Versão (travado)','Aplicativo relacionado','Versão (relacionado)','Assinatura do travamento'],
+  'livekernelevent': ['Código do bugcheck','Parâmetro 1','Parâmetro 2','Parâmetro 3','Parâmetro 4'],
+};
+
+function parseWER(txt){
+  const named = {}, flat = {};
+  txt.split(/\r?\n/).forEach(line=>{
+    const eq = line.indexOf('=');
+    if (eq < 1) return;
+    const key = line.slice(0,eq).trim(), val = line.slice(eq+1).trim();
+    const m = key.match(/^(?:Sig|DynamicSig)\[(\d+)\]\.(Name|Value)$/i);
+    if (m){ const idx = m[1]; named[idx] = named[idx] || {}; named[idx][m[2]] = val; }
+    else { flat[key] = val; }
+  });
+  const byLabel = {};
+  Object.values(named).forEach(p=>{ if (p.Name && p.Value !== undefined) byLabel[p.Name.toLowerCase()] = p.Value; });
+
+  // Lista posicional (Sig[0] = P1, Sig[1] = P2, ...), usada tanto pelos esquemas
+  // de bucket conhecidos quanto pelo fallback "assinatura completa" abaixo.
+  const sigList = Object.keys(named)
+    .map(k=>({ idx:+k, name:named[k].Name, value:named[k].Value }))
+    .filter(p=>p.value !== undefined && p.value !== '')
+    .sort((a,b)=>a.idx-b.idx);
+  const labelToIdx = {};
+  sigList.forEach(p=>{ if (p.name) labelToIdx[p.name.toLowerCase()] = p.idx; });
+  const usedIdx = new Set();
+  const pick = (...labels)=>{
+    for (const l of labels){
+      const v = byLabel[l.toLowerCase()];
+      if (v !== undefined){
+        if (labelToIdx[l.toLowerCase()] !== undefined) usedIdx.add(labelToIdx[l.toLowerCase()]);
+        return v;
+      }
+    }
+    return null;
+  };
+
+  const fields = {};
+  if (flat['EventType']) fields['Tipo de evento'] = flat['EventType'];
+
+  const schema = WER_BUCKET_SCHEMAS[String(flat['EventType']||'').toLowerCase()];
+  if (schema){
+    schema.forEach((label,i)=>{
+      const sig = sigList[i];
+      if (sig){ fields[label] = sig.value; usedIdx.add(sig.idx); }
+    });
+  } else {
+    const appName = pick('Application Name'); if (appName) fields['Aplicativo'] = appName;
+    const appVersion = pick('Application Version'); if (appVersion) fields['Versão do aplicativo'] = appVersion;
+    const faultModule = pick('Fault Module Name'); if (faultModule) fields['Módulo com falha'] = faultModule;
+    const faultModuleVersion = pick('Fault Module Version'); if (faultModuleVersion) fields['Versão do módulo'] = faultModuleVersion;
+  }
+  if (flat['OS Version']) fields['Sistema operacional'] = flat['OS Version'];
+
+  const excCodeRaw = pick('Exception Code');
+  const excOffsetRaw = pick('Exception Offset');
+  const excFields = {};
+  if (excCodeRaw){
+    const hex = fmtCode(parseInt(excCodeRaw, 16));
+    excFields['Código'] = hex;
+    excFields['Significado'] = NTSTATUS_MAP[hex] || 'Código não catalogado — pesquise pelo valor acima';
+  }
+  if (excOffsetRaw) excFields['Deslocamento da falha'] = '0x'+excOffsetRaw.replace(/^0+(?=.)/,'').toUpperCase();
+
+  // Assinatura completa: qualquer Sig/DynamicSig ainda nao usado nos campos amigaveis
+  // acima, para nunca esconder dado bruto em tipos de bucket nao catalogados.
+  const fullSig = {};
+  sigList.forEach(p=>{
+    if (usedIdx.has(p.idx)) return;
+    fullSig['P'+(p.idx+1)+(p.name ? ' — '+p.name : '')] = p.value;
+  });
+
+  return { fields, excFields, fullSig };
+}
+
+async function tryInterpretDump(f){
+  const file = FILES[f.rel];
+  if (!file) return null;
+  try {
+    const head = new DataView(await file.slice(0,32).arrayBuffer());
+    const sig = head.getUint32(0, true);
+    if (sig === 0x504D444D) return await interpretMinidump(file, head); // 'MDMP'
+    if (sig === 0x45474150) return await interpretKernelDump(file);     // 'PAGE'
+    return null;
+  } catch(e){ return null; }
+}
+
+async function interpretMinidump(file, head){
+  const numStreams = head.getUint32(8, true);
+  const dirRva = head.getUint32(12, true);
+  if (!numStreams || numStreams > 4096 || !dirRva) return null;
+
+  const dirDv = new DataView(await file.slice(dirRva, dirRva + numStreams*12).arrayBuffer());
+  const streams = {};
+  for (let i=0;i<numStreams;i++){
+    const b = i*12;
+    streams[dirDv.getUint32(b,true)] = { dataSize: dirDv.getUint32(b+4,true), rva: dirDv.getUint32(b+8,true) };
+  }
+
+  const fields = {};
+  if (streams[7]){ // SystemInfoStream
+    const d = new DataView(await file.slice(streams[7].rva, streams[7].rva+24).arrayBuffer());
+    const archMap = {0:'x86',5:'ARM',6:'IA64',9:'x64',12:'ARM64'};
+    const arch = d.getUint16(0,true);
+    fields['Arquitetura'] = archMap[arch] || ('desconhecida (0x'+arch.toString(16)+')');
+    fields['Versão do SO'] = d.getUint32(8,true)+'.'+d.getUint32(12,true)+' (Build '+d.getUint32(16,true)+')';
+  }
+
+  let excAddr = null;
+  const excFields = {};
+  if (streams[6]){ // ExceptionStream
+    const d = new DataView(await file.slice(streams[6].rva, streams[6].rva+40).arrayBuffer());
+    const hex = fmtCode(d.getUint32(8,true));
+    excAddr = (BigInt(d.getUint32(28,true))<<32n) | BigInt(d.getUint32(24,true));
+    excFields['Código'] = hex;
+    excFields['Significado'] = NTSTATUS_MAP[hex] || 'Código não catalogado — pesquise pelo valor acima';
+    excFields['Endereço da falha'] = fmtHex64(excAddr);
+  }
+
+  let culprit = null, moduleCount = 0;
+  if (streams[4] && excAddr !== null){ // ModuleListStream
+    moduleCount = new DataView(await file.slice(streams[4].rva, streams[4].rva+4).arrayBuffer()).getUint32(0,true);
+    const cap = Math.min(moduleCount, 800);
+    if (cap > 0){
+      const ed = new DataView(await file.slice(streams[4].rva+4, streams[4].rva+4+cap*108).arrayBuffer());
+      for (let i=0;i<cap;i++){
+        const b = i*108;
+        const base = (BigInt(ed.getUint32(b+4,true))<<32n) | BigInt(ed.getUint32(b,true));
+        const size = ed.getUint32(b+8,true);
+        if (excAddr >= base && excAddr < base + BigInt(size)){
+          const nameRva = ed.getUint32(b+20,true);
+          const len = new DataView(await file.slice(nameRva, nameRva+4).arrayBuffer()).getUint32(0,true);
+          const nameBuf = await file.slice(nameRva+4, nameRva+4+len).arrayBuffer();
+          culprit = new TextDecoder('utf-16le').decode(nameBuf).split(/[\\/]/).pop();
+          break;
+        }
+      }
+    }
+  }
+
+  let out = '<div class="grid">';
+  out += kvCard('Sistema no momento da falha', fields, Object.keys(fields).map(k=>[k,k]));
+  if (Object.keys(excFields).length) out += kvCard('Exceção que gerou o dump', excFields, Object.keys(excFields).map(k=>[k,k]));
+  out += '</div>';
+  if (culprit){
+    out += '<div class="page-desc"><b>Módulo mais próximo do endereço de falha:</b> '+esc(culprit)+' ('+moduleCount+' módulos carregados no total). Isso aponta uma direção — não confirma a causa raiz, já que sem símbolos não há pilha de chamadas.</div>';
+  } else if (moduleCount){
+    out += '<div class="page-desc">'+moduleCount+' módulos carregados no momento da falha (nenhum corresponde exatamente ao endereço de exceção).</div>';
+  }
+  out += '<div class="binary-note">'+icon('raw')+'<div>Interpretação automática do cabeçalho do dump. Sem símbolos (PDB) não há pilha de chamadas — para causa raiz completa, analise com WinDbg (<code>!analyze -v</code>).</div></div>';
+  return out;
+}
+
+async function interpretKernelDump(file){
+  const d = new DataView(await file.slice(0, 96).arrayBuffer());
+  if (d.getUint32(4, true) !== 0x34365544) return null; // so cobrimos 'DU64' (kernel dump 64-bit)
+
+  const numProcessors = d.getUint32(0x34, true);
+  const bugCheckCode = d.getUint32(0x38, true);
+  if (!bugCheckCode || numProcessors < 1 || numProcessors > 256) return null; // sanidade: campos nao documentados oficialmente
+
+  const codeHex = fmtCode(bugCheckCode);
+  const fields = {
+    'Código de parada (bug check)': codeHex,
+    'Significado': BUGCHECK_MAP[codeHex] || ('Código não catalogado — pesquise "bug check '+codeHex+'"'),
+    'Parâmetro 1': fmtHex64(d.getBigUint64(0x40, true)),
+    'Parâmetro 2': fmtHex64(d.getBigUint64(0x48, true)),
+    'Parâmetro 3': fmtHex64(d.getBigUint64(0x50, true)),
+    'Parâmetro 4': fmtHex64(d.getBigUint64(0x58, true)),
+    'Processadores': String(numProcessors),
+  };
+  let out = '<div class="grid">'+kvCard('Dump de kernel — tela azul (BSOD)', fields, Object.keys(fields).map(k=>[k,k]))+'</div>';
+  out += '<div class="binary-note">'+icon('raw')+'<div>Leitura best-effort da estrutura interna do dump (layout estável desde o Windows Vista x64, porém não documentado oficialmente). Para identificar o driver/thread responsável, analise com WinDbg (<code>!analyze -v</code>).</div></div>';
+  return out;
+}
 
 function fileBrowser(folder){
   const files = filesInFolder(folder);
@@ -900,15 +1251,74 @@ function initFileBrowser(folder, files, listId){
   }
 }
 
+/* Caminho relativo do arquivo a partir da localizacao do proprio visualizador.html
+   no disco - so existe no modo embutido, onde o HTML foi gravado na raiz de
+   $Destino (irmao das pastas 01_EventLogs, 03_Dumps_e_WER etc). No modo
+   "selecionar pasta" a File API nao expoe caminho absoluto, entao nao ha link
+   confiavel possivel. As chaves (f.rel) vem sempre como "NomeDaRaiz/subpasta/arquivo" -
+   basta remover o primeiro segmento (nome da raiz) para virar o caminho relativo
+   ao HTML, que fica um nivel acima dessa raiz nomeada. */
+function fileHref(rel){
+  if (!EMBEDDED) return null;
+  const parts = rel.split('/');
+  if (parts.length < 2) return null;
+  return parts.slice(1).map(encodeURIComponent).join('/');
+}
+function openFileLinkHtml(f){
+  const href = fileHref(f.rel);
+  if (!href) return '';
+  return '<div style="margin-top:12px">'
+    + '<a class="btn" href="'+href+'" download="'+esc(f.name)+'">'+icon('raw')+' Abrir/baixar arquivo</a>'
+    + '<div style="margin-top:6px;font-size:11.5px;color:hsl(var(--muted-foreground))">O navegador baixa o arquivo; ao abri-lo em seguida, o Windows usa o programa associado (Visualizador de Eventos para .evtx, ou o associado a .dmp/WinDbg).</div>'
+    + '</div>';
+}
+
+async function showEvtx(f, view){
+  view.innerHTML = '<div class="empty-state"><p>Procurando tabela de eventos exportada…</p></div>';
+  const stem = f.name.replace(/\.evtx$/i, '');
+  const csvRows = await getCSV(stem + '.eventos.csv');
+  let out = '';
+  if (csvRows && csvRows.length){
+    out += '<div class="page-desc" style="margin:0 0 14px">Mostrando até 300 eventos mais recentes deste log, exportados durante a coleta (mensagens já formatadas pelo Windows). Para consulta completa ou em tempo real, abra o arquivo .evtx original no Visualizador de Eventos.</div>';
+    out += dataTable(csvRows, [
+      ['Data/hora','TimeCreated'],['ID','Id'],['Nível','LevelDisplayName'],
+      ['Provedor','ProviderName'],['Mensagem','Message','','wrap']
+    ]);
+  } else {
+    out += '<div class="binary-note">'+icon('raw')+'<div><b>'+esc(f.name)+'</b> ('+fmtBytes(f.size)+')<br>'
+      + 'Arquivo de log de eventos binário. Nenhuma tabela de eventos foi exportada para este log durante a coleta (log vazio, sem provider de mensagens registrado, ou coleta feita antes deste recurso existir). Abra com o Visualizador de Eventos do Windows (eventvwr.msc → Ação → Abrir Log Salvo) ou <code>Get-WinEvent -Path</code> no PowerShell.'
+      + '</div></div>';
+  }
+  out += openFileLinkHtml(f);
+  view.innerHTML = out;
+}
+
 async function showFile(f, listId){
   const view = document.getElementById(listId+'_view');
   const ext = '.'+f.name.split('.').pop().toLowerCase();
+
+  if (ext === '.evtx'){
+    await showEvtx(f, view);
+    return;
+  }
+
+  if (ext === '.dmp'){
+    view.innerHTML = '<div class="empty-state"><p>Lendo cabeçalho do dump…</p></div>';
+    const interpretado = !EMBEDDED ? await tryInterpretDump(f) : null;
+    if (interpretado){ view.innerHTML = interpretado + openFileLinkHtml(f); return; }
+    view.innerHTML = '<div class="binary-note">'+icon('raw')+'<div><b>'+esc(f.name)+'</b> ('+fmtBytes(f.size)+')<br>'
+      + (EMBEDDED
+          ? 'Arquivos de despejo de memória não são embutidos no visualizador autocontido (podem ser grandes demais). Selecione a pasta original da coleta (em vez de abrir este HTML) para ver o cabeçalho interpretado automaticamente, ou analise com WinDbg (<code>!analyze -v</code>) para a causa raiz completa.'
+          : 'Não foi possível interpretar o cabeçalho deste dump (formato não reconhecido ou arquivo truncado). Analise com WinDbg (<code>!analyze -v</code>) para identificar a causa do travamento.')
+      + '</div></div>' + openFileLinkHtml(f);
+    return;
+  }
+
   const isBinary = BINARY_EXT.includes(ext) || (EMBEDDED && EMBEDDED.files[f.rel] === null);
   if (isBinary){
     view.innerHTML = '<div class="binary-note">'+icon('raw')+'<div><b>'+esc(f.name)+'</b> ('+fmtBytes(f.size)+')<br>'
-      + (ext==='.evtx' ? 'Arquivo de log de eventos binário. Abra com o Visualizador de Eventos do Windows (eventvwr.msc → Ação → Abrir Log Salvo) ou <code>Get-WinEvent -Path</code> no PowerShell. No modo embutido, o conteúdo binário não é incluído — abra o arquivo original na pasta da coleta.'
-        : 'Arquivo de despejo de memória binário. Analise com WinDbg ou <code>!analyze -v</code> para identificar a causa do travamento. O conteúdo binário não é embutido no visualizador — use o arquivo original.')
-      + '</div></div>';
+      + 'Arquivo binário ou grande demais para exibir. No modo embutido, o conteúdo não é incluído — abra o arquivo original na pasta da coleta.'
+      + '</div></div>' + openFileLinkHtml(f);
     return;
   }
   view.innerHTML = '<div class="empty-state"><p>Carregando…</p></div>';
@@ -923,6 +1333,18 @@ async function showFile(f, listId){
     view.innerHTML = dataTable(rows, headers.map(h=>[h,h]));
   } else if (ext==='.md'){
     view.innerHTML = '<div class="card">'+renderMD(txt)+'</div>';
+  } else if (ext==='.wer'){
+    const w = parseWER(txt);
+    let out = '<div class="grid">'
+      + kvCard('Relatório de erro', w.fields, Object.keys(w.fields).map(k=>[k,k]));
+    if (Object.keys(w.excFields).length) out += kvCard('Exceção', w.excFields, Object.keys(w.excFields).map(k=>[k,k]));
+    out += '</div>';
+    if (w.fullSig && Object.keys(w.fullSig).length){
+      out += '<div class="section-title">Assinatura completa (parâmetros não traduzidos)</div>'
+        + kvCard('Assinatura', w.fullSig, Object.keys(w.fullSig).map(k=>[k,k]));
+    }
+    out += '<details class="rawtoggle"><summary>Ver '+esc(f.name)+' original</summary><pre>'+esc(txt)+'</pre></details>';
+    view.innerHTML = out;
   } else {
     const truncated = txt.length>60000;
     view.innerHTML = '<pre>'+esc(truncated? txt.slice(0,60000)+'\n\n[...truncado, arquivo grande...]' : txt)+'</pre>';
@@ -990,64 +1412,8 @@ document.getElementById('reloadBtn').addEventListener('click', ()=>{
   FILES={}; TREE={}; JSONCACHE={}; ACTIVE=null; EMBEDDED=null;
   document.getElementById('navwrap').innerHTML='';
   document.getElementById('reloadBtn').style.display='none';
-  document.getElementById('mdBtn').style.display='none';
   showLanding();
 });
-
-/* ============================================================
-   EXPORTAÇÃO EM MARKDOWN
-============================================================ */
-function tableToMD(rows, columns){
-  if (!rows || !rows.length) return '_Sem dados._\n';
-  const strip = h => String(h).replace(/<[^>]+>/g,'').replace(/\|/g,'\\|').replace(/\n/g,' ').trim();
-  let md = '| '+columns.map(c=>strip(c[0])).join(' | ')+' |\n';
-  md += '| '+columns.map(()=>'---').join(' | ')+' |\n';
-  rows.forEach(r=>{
-    md += '| '+columns.map(c=>{
-      let v = c[2] ? c[2](r[c[1]], r) : r[c[1]];
-      return strip(v===undefined||v===null?'—':v);
-    }).join(' | ')+' |\n';
-  });
-  return md+'\n';
-}
-
-async function exportMarkdown(){
-  const meta = (await getJSON('00_Resumo/coleta_consolidada.json')||{}).Metadados || {};
-  const rootName = EMBEDDED ? EMBEDDED.rootName : ROOTNAME;
-  let md = '# Diagnóstico — '+rootName+'\n\n';
-  md += '- **Ambiente:** '+(meta.Ambiente||'—')+'\n';
-  md += '- **Data da coleta:** '+(meta.DataColeta||'—')+'\n';
-  md += '- **Unidade do Windows:** '+(meta.UnidadeWindows||'—')+'\n';
-  md += '- **Módulos coletados:** '+((meta.ColetasRealizadas||[]).join(', ')||'—')+'\n\n';
-
-  // Anexa todos os RESUMO_*.md que existirem
-  const mdFiles = allKeys().filter(k=>/RESUMO_.*\.md$/i.test(k) || /RESUMO_GERAL\.md$/i.test(k));
-  for (const k of mdFiles){
-    const txt = await readByKey(k);
-    if (txt){ md += '\n---\n\n'+txt.trim()+'\n'; }
-  }
-
-  // Tabelas principais de hardware/serviços/bateria a partir dos CSV
-  const blocks = [
-    ['## Serviços do Windows', await getCSV('05_Registro/servicos.csv'), [['Nome','Name'],['Estado','State'],['Início','StartMode'],['Caminho','PathName']]],
-    ['## Memória RAM', await getCSV('09_Dados_Brutos/memoria.csv'), [['Local','DeviceLocator'],['Capacidade',null,r=>fmtBytesRaw(r.Capacity)],['Velocidade','Speed'],['Fabricante','Manufacturer']]],
-    ['## Discos', await getCSV('09_Dados_Brutos/discos.csv'), [['Modelo','Model'],['Tamanho',null,r=>fmtBytesRaw(r.Size)],['Interface','InterfaceType'],['Status','Status']]],
-    ['## Dispositivos com erro', await getCSV('09_Dados_Brutos/dispositivos_com_erro.csv'), [['Nome','Name'],['Código','ConfigManagerErrorCode'],['Device ID','DeviceID']]],
-    ['## Histórico de bateria', await getCSV('07_Bateria_BMS/historico_capacidade.csv'), [['Período','Periodo'],['Cheia','CapacidadeCheia'],['Projeto','CapacidadeProjeto']]],
-    ['## Eventos críticos', await getCSV('04_Boot/eventos_criticos_desligamento.csv'), [['Data','TimeCreated'],['ID','Id'],['Nível','LevelDisplayName'],['Provedor','ProviderName']]],
-  ];
-  for (const [title, rows, cols] of blocks){
-    if (rows && rows.length){ md += '\n---\n\n'+title+'\n\n'+tableToMD(rows, cols); }
-  }
-
-  const blob = new Blob([md], {type:'text/markdown;charset=utf-8'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'diagnostico_'+rootName+'.md';
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-document.getElementById('mdBtn').addEventListener('click', exportMarkdown);
 
 /* ============================================================
    BOOT: modo embutido (dados inline) ou selecao manual de pasta
@@ -1059,7 +1425,6 @@ function startEmbedded(){
   const first = SECTIONS.find(s=>filesInFolder(s.folder).length>0) || SECTIONS[0];
   navigate(first.id);
   document.getElementById('reloadBtn').style.display='none'; // sem "carregar outra" em modo embutido
-  document.getElementById('mdBtn').style.display='inline-flex';
 }
 
 if (window.EMBEDDED_DATA && window.EMBEDDED_DATA.files && Object.keys(window.EMBEDDED_DATA.files).length){
@@ -1141,6 +1506,34 @@ $script:WinDrive  = $null
 $script:IsWinPE   = $false
 $script:ModoAoVivo= $false
 $script:AmbienteOk= $false
+
+function Obter-NSPlacaMae {
+    <#
+    .SYNOPSIS
+      Numero de serie da placa-mae (SMBIOS), sanitizado para uso em nome de pasta.
+      Retorna $null quando indisponivel ou quando o valor e um placeholder generico
+      de fabricante (ex.: "None", "Default string", "To be filled by O.E.M."), casos
+      comuns em placas brancas/genericas.
+    #>
+    $bruto = $null
+    try {
+        $bruto = (Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1).SerialNumber
+    } catch {}
+    if ([string]::IsNullOrWhiteSpace($bruto)) { return $null }
+
+    $bruto = $bruto.Trim()
+    $placeholders = @(
+        'none', 'n/a', 'na', 'default string', 'to be filled by o.e.m.',
+        'system serial number', 'not specified', 'not applicable', 'serial number', '0'
+    )
+    if ($placeholders -contains $bruto.ToLower()) { return $null }
+    if ($bruto -match '^[0x]+$') { return $null }
+
+    $limpo = ($bruto -replace '[\\/:*?"<>|]', '') -replace '\s+', ''
+    if ([string]::IsNullOrWhiteSpace($limpo)) { return $null }
+    if ($limpo.Length -gt 40) { $limpo = $limpo.Substring(0, 40) }
+    return $limpo
+}
 
 function Selecionar-DestinoAuto {
     $cands = @()
@@ -1237,11 +1630,11 @@ function Finalizar-Visualizador {
     Gerar-ArquivoJson
     Gerar-ResumoGeral
 
-    $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg')
+    $extTexto = @('.json', '.csv', '.md', '.txt', '.log', '.xml', '.html', '.htm', '.ini', '.reg', '.wer')
     $extBinRef = @('.evtx', '.dmp')
     $limiteBytes = 6MB
 
-    Executar "Incorporacao dos dados coletados diretamente no HTML" {
+    Executar "Criando HTML" {
         $baseLen = $Destino.TrimEnd('\').Length + 1
         $rootName = Split-Path $Destino -Leaf
 
@@ -1254,7 +1647,9 @@ function Finalizar-Visualizador {
         $arquivos = Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -ne 'visualizador.html' }
 
+        $sbTamanhos = New-Object System.Text.StringBuilder
         $primeiro = $true
+        $primeiroTamanho = $true
         foreach ($arq in $arquivos) {
             $rel = ($rootName + '\' + $arq.FullName.Substring($baseLen)) -replace '\\', '/'
             $ext = $arq.Extension.ToLower()
@@ -1276,8 +1671,19 @@ function Finalizar-Visualizador {
             } else {
                 [void]$sb.Append("    $chaveJson`: null")
             }
+
+            # Tamanho real em bytes, gravado a parte: necessario porque arquivos binarios/grandes
+            # ficam com conteudo 'null' acima (nao embutidos), mas o visualizador ainda precisa
+            # exibir o tamanho correto na listagem de arquivos.
+            if (-not $primeiroTamanho) { [void]$sbTamanhos.AppendLine(",") }
+            $primeiroTamanho = $false
+            [void]$sbTamanhos.Append("    $chaveJson`: $($arq.Length)")
         }
 
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("  },")
+        [void]$sb.AppendLine("  sizes: {")
+        [void]$sb.Append($sbTamanhos.ToString())
         [void]$sb.AppendLine("")
         [void]$sb.AppendLine("  }")
         [void]$sb.AppendLine("};")
@@ -1286,11 +1692,11 @@ function Finalizar-Visualizador {
         # Monta o HTML final: template limpo + bloco de dados injetado antes de </head>.
         # Sempre parte do $script:htmlContent original (nao do arquivo em disco), para nunca
         # acumular injeções duplicadas mesmo se a funcao rodar varias vezes na mesma coleta.
-        $htmlFinal = $script:htmlContent -replace '</head>', ($sb.ToString() + '</head>')
+        $htmlFinal = $script:htmlContent.Replace('</head>', ($sb.ToString() + '</head>'))
         [System.IO.File]::WriteAllText($destHtml, $htmlFinal, (New-Object System.Text.UTF8Encoding($false)))
 
         $tam = [math]::Round((Get-Item $destHtml).Length / 1MB, 2)
-        Log "visualizador.html atualizado com os dados coletados ($tam MB). Abra com duplo-clique - nao precisa de mais nada." 'Green'
+        Log "visualizador.html atualizado com os dados coletados ($tam MB)." 'Green'
     }
 }
 
@@ -1308,8 +1714,10 @@ function Detectar-Ambiente {
     Log "Inspecionando estrutura de particoes do Windows..." 'Cyan'
     $script:WinDrive = $null
     foreach ($letra in 67..90 | ForEach-Object { [char]$_ }) {
-        $candidato = "$letra`:\Windows\System32\config\SYSTEM"
-        if (Test-Path $candidato) { $script:WinDrive = "$letra`:"; break }
+        $candidato = "$letra`:\Windows\System32\ntoskrnl.exe"
+        try {
+            if (Test-Path $candidato -ErrorAction Stop) { $script:WinDrive = "$letra`:"; break }
+        } catch {}
     }
 
     $script:ModoAoVivo = (-not $script:IsWinPE) -and $script:WinDrive -and ($script:WinDrive -eq $RunningDrive)
@@ -1324,6 +1732,45 @@ function Detectar-Ambiente {
     $script:AmbienteOk = $true
 }
 
+function Exportar-EventosEvtx {
+    <#
+    .SYNOPSIS
+      Exporta, para cada .evtx coletado, um CSV companheiro (mesmo nome + sufixo
+      .eventos.csv) com os eventos mais recentes - ja com a Message formatada
+      pelo proprio Windows via Get-WinEvent. E o que permite ao visualizador.html
+      mostrar uma tabela ordenavel/filtravel sem precisar interpretar o binario
+      EVTX no navegador. Best-effort e nao fatal: logs vazios ou sem provider
+      registrado (comum em WinPE/offline) simplesmente nao geram CSV - o
+      visualizador cai de volta para o link de abrir o arquivo original.
+    #>
+    param([int]$MaxEventosPorLog = 300, [int]$LimiteSegundos = 120)
+
+    $arquivos = Get-ChildItem $script:Pastas.EventLogs -Filter '*.evtx' -File -ErrorAction SilentlyContinue
+    if (-not $arquivos) { return }
+
+    Log ">> Exportando eventos dos .evtx coletados para tabela do visualizador..." 'Cyan'
+    $cron = [System.Diagnostics.Stopwatch]::StartNew()
+    $nExportados = 0
+
+    foreach ($arq in $arquivos) {
+        if ($cron.Elapsed.TotalSeconds -gt $LimiteSegundos) {
+            Log "[INFO] Limite de tempo da exportacao de eventos atingido - logs restantes ficam sem tabela (ainda abrem via Visualizador de Eventos)." 'DarkGray'
+            break
+        }
+        $eventos = $null
+        try {
+            $eventos = Get-WinEvent -Path $arq.FullName -MaxEvents $MaxEventosPorLog -ErrorAction Stop |
+                Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message
+        } catch { continue }
+        if ($eventos) {
+            $csvDest = Join-Path $arq.DirectoryName ($arq.BaseName + '.eventos.csv')
+            Salvar-Csv $eventos $csvDest
+            $nExportados++
+        }
+    }
+    Log "Exportacao de eventos concluida: $nExportados log(s) com tabela gerada." 'Green'
+}
+
 function Coletar-EventLogs {
     Detectar-Ambiente
     if (-not $script:WinDrive) { Log "[ABORTADO] Event Logs - Volume do sistema nao identificado" 'Yellow'; return }
@@ -1331,6 +1778,7 @@ function Coletar-EventLogs {
     Executar "Extracao de Event Logs (.evtx)" {
         Copy-Item "$($script:WinDrive)\Windows\System32\winevt\Logs\*" $script:Pastas.EventLogs -Recurse -Force -ErrorAction Stop
     }
+    Executar "Exportacao de eventos para tabela do visualizador" { Exportar-EventosEvtx } | Out-Null
     Marcar 'EventLogs'
 }
 
@@ -1430,6 +1878,12 @@ function Coletar-Registro {
             $InfoWindowsInstalado['Produto'] = $cv.ProductName
             $InfoWindowsInstalado['Versao'] = if ($cv.DisplayVersion) { $cv.DisplayVersion } else { $cv.ReleaseId }
             $InfoWindowsInstalado['Build'] = "$($cv.CurrentBuild).$($cv.UBR)"
+            # Bug conhecido da Microsoft: ProductName no registro segue reportando "Windows 10"
+            # mesmo em instalacoes de Windows 11 (builds >= 22000). Corrige pelo numero de build,
+            # que e a fonte confiavel.
+            if ($InfoWindowsInstalado['Produto'] -match 'Windows 10' -and [int64]$cv.CurrentBuild -ge 22000) {
+                $InfoWindowsInstalado['Produto'] = $InfoWindowsInstalado['Produto'] -replace 'Windows 10', 'Windows 11'
+            }
             $InfoWindowsInstalado['Instalado em'] = if ($cv.InstallDate) { [DateTimeOffset]::FromUnixTimeSeconds([int64]$cv.InstallDate).LocalDateTime } else { '-' }
             $InfoWindowsInstalado['Dono registrado'] = $cv.RegisteredOwner
             Log "[OK] Leitura das subchaves de versao e build do sistema" 'Green'
@@ -1882,22 +2336,27 @@ function Gerar-ArquivoJson {
         Boot = [ordered]@{
             EventosCriticos = $script:Dados['nCriticos']
         }
+        # Apenas os campos que o visualizador realmente le sao mantidos aqui. Embutir os
+        # objetos CIM completos (com toda a metadata interna: CimClass, Qualifiers etc.)
+        # inflava o coleta_consolidada.json para dezenas de MB, estourando o limite de 6MB
+        # de embutimento no HTML e fazendo o arquivo cair silenciosamente como "nao
+        # encontrado". Os dados brutos completos continuam disponiveis em 09_Dados_Brutos
+        # (JSON/CSV) e o visualizador ja tem fallback automatico para eles.
         Hardware = [ordered]@{
-            Sistema = $script:Dados['CS']
-            PlacaMae = $script:Dados['BB']
-            Processador = $script:Dados['CPU']
-            Memoria = $script:Dados['MEM']
-            BIOS = $script:Dados['BIOS']
-            Discos = $script:Dados['DISK']
-            Particoes = $script:Dados['PART']
-            Video = $script:Dados['VID']
-            Rede = $script:Dados['NET']
-            DispositivosErro = $script:Dados['PNP_ERR']
+            Sistema = $script:Dados['CS'] | Select-Object Manufacturer, Model
+            PlacaMae = $script:Dados['BB'] | Select-Object Manufacturer, Product
+            Processador = $script:Dados['CPU'] | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
+            Memoria = $script:Dados['MEM'] | Select-Object DeviceLocator, Capacity, Speed, Manufacturer, SerialNumber
+            BIOS = $script:Dados['BIOS'] | Select-Object Manufacturer, SMBIOSBIOSVersion, ReleaseDate, SerialNumber
+            Discos = $script:Dados['DISK'] | Select-Object Model, Size, InterfaceType, Status, SerialNumber
+            Particoes = $script:Dados['PART'] | Select-Object Name, Type, Size, BootPartition
+            Video = $script:Dados['VID'] | Select-Object Name, AdapterRAM, CurrentHorizontalResolution, CurrentVerticalResolution
+            Rede = $script:Dados['NET'] | Select-Object Description, MACAddress, IPAddress, DHCPEnabled
+            DispositivosErro = $script:Dados['PNP_ERR'] | Select-Object Name, ConfigManagerErrorCode, DeviceID
         }
         Bateria = [ordered]@{
             DesgastePercentual = $script:Dados['DesgastePct']
             Ciclos = $script:Dados['Ciclos']
-            TelemetriaWMI = $script:Dados['BatCycle']
             EventosEnergia = $script:Dados['nBateria']
         }
     }
@@ -2155,11 +2614,13 @@ function Loop-Menu {
 }
 
 if (-not $Destino) {
+    $nsPlaca = Obter-NSPlacaMae
+    $nomeBase = if ($nsPlaca) { "Coleta_$($nsPlaca)_$Timestamp" } else { "Coleta_SemNS_$Timestamp" }
     $raizAuto = Selecionar-DestinoAuto
     if ($raizAuto) {
-        $Destino = Join-Path ($raizAuto + '\') "ColetasDiag\target_$Timestamp"
+        $Destino = Join-Path ($raizAuto + '\') "ColetasDiag\$nomeBase"
     } else {
-        $Destino = Join-Path $ScriptRoot "target_$Timestamp"
+        $Destino = Join-Path $ScriptRoot $nomeBase
     }
 }
 
